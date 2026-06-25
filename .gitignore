@@ -1,0 +1,30 @@
+*.envrc
+key.txt
+*.DS_Store
+graphify-out/.graphify_*
+graphify-out/cache/
+
+
+# Never commit the workstation/local plaintext ZFS key seeded into install.
+local-zfs.key
+*.key
+
+# Real sops files are SOPS-ENCRYPTED, so they MUST be committed — that is the
+# standard sops-nix+flakes pattern and matches how the prod repo handles its
+# *.enc.yaml. They are deliberately NOT gitignored: when building from a flake
+# (nixos-anywhere --flake, deploy-rs, nix flake check), Nix copies ONLY
+# git-tracked files into the store, so a gitignored secrets/*.sops.yaml would be
+# INVISIBLE to the flake source and sops-nix activation would fail to find it.
+#
+# ⚠️ Before committing, verify each secrets/*.sops.yaml is actually encrypted
+#    (e.g. `grep -L 'sops:' secrets/*.sops.yaml` returns nothing, or a pre-commit
+#    sops check) so a still-plaintext file can never slip in.
+
+# flake.lock is intentionally NOT committed here — the operator runs
+# `nix flake lock` (README). Remove this line once you commit a lock file.
+flake.lock
+
+# nixos-anywhere per-node extra-files staging (contains seeded SSH host keys).
+node-*-extra/
+result
+result-*
