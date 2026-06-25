@@ -1,0 +1,30 @@
+#!/bin/bash
+# garage-fleet devcontainer postCreate. Mirrors the main k3s workspace setup
+# (mise + Claude Code + RTK + Caveman + Graphify) and primes Nix.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# --- mise: trust + install the pinned tools ----------------------------------
+/usr/local/bin/mise trust "$ROOT/mise.toml" && /usr/local/bin/mise install
+
+# --- Claude Code -------------------------------------------------------------
+curl -fsSL https://claude.ai/install.sh | bash
+
+# --- RTK: token-optimizing CLI proxy (installs the Bash PreToolUse hook) ------
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+rtk init -g --auto-patch
+
+# --- Caveman: plugin + SessionStart/UserPromptSubmit hooks + statusline -------
+curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.sh | bash
+
+# --- Graphify: install via uv (provided by mise), then wire to Claude Code ----
+uv tool install graphifyy
+graphify install
+
+# --- Nix: prime the flake lock (aarch64-native; x86_64 closures build on the
+#     box via `mise run deploy` --remote-build) ---------------------------------
+if [ -f /home/vscode/.nix-profile/etc/profile.d/nix.sh ]; then
+  . /home/vscode/.nix-profile/etc/profile.d/nix.sh
+  ( cd "$ROOT" && [ -f flake.lock ] || nix flake lock )
+fi

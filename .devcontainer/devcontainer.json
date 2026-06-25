@@ -1,0 +1,19 @@
+{
+    "build": {
+        "context": "..",
+        "dockerfile": "Dockerfile",
+        "options": [
+            "--platform=linux/amd64"
+        ]
+    },
+    "runArgs": [
+        "--platform=linux/amd64"
+    ],
+    "containerEnv": {
+        "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}"
+    },
+    "postCreateCommand": "scripts/setup",
+    "forwardPorts": [
+        8080
+    ]
+}

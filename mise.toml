@@ -1,0 +1,35 @@
+# garage-fleet workstation tools (mise). Nix-specific tooling (ssh-to-age,
+# deploy-rs, disko) comes from `nix run`/the flake; mise carries the everyday
+# CLIs used by documentations/12. Mirrors the main k3s workspace's mise setup.
+[tools]
+sops = "latest"
+age = "latest"
+jq = "latest"
+shellcheck = "latest"
+uv = "latest"         # for graphify (scripts/setup)
+gh = "latest"
+
+# --- tasks: thin wrappers over the doc-12 workstation steps -------------------
+[tasks.lock]
+description = "Resolve flake inputs -> flake.lock (no build; arch-independent)"
+run = "nix flake lock"
+
+[tasks.check]
+description = "Evaluate the flake + deploy-rs schema checks"
+run = "nix flake check"
+
+[tasks.host-key]
+description = "Pre-generate node-B's SSH host key + print its age recipient (doc 12 §1.2)"
+run = """
+install -d -m700 node-b-extra/etc/ssh
+ssh-keygen -t ed25519 -N '' -C node-b -f node-b-extra/etc/ssh/ssh_host_ed25519_key
+nix run nixpkgs#ssh-to-age -- -i node-b-extra/etc/ssh/ssh_host_ed25519_key.pub
+"""
+
+[tasks.deploy]
+description = "Deploy node-B over the tailnet; node-B builds its OWN x86_64 closure"
+run = "nix run github:serokell/deploy-rs -- .#node-b --remote-build"
+
+[tasks.lint]
+description = "shellcheck the repo scripts"
+run = "shellcheck scripts/setup secrets/gen-secrets.sh"

@@ -1,0 +1,138 @@
+# modules/base.nix — host hardening shared by every fleet node (doc 09 ADR-2,
+# doc 10 Phase 1 "hardening.nix"). SSH hardening, nftables firewall trusting
+# only the tailnet + ssh, users, bounded boot generations, flakes, no
+# auto-upgrade (atomic deploys come from deploy-rs, doc 09 ADR-4).
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+{
+  options.fleet = {
+    # This node's tailscale0 overlay IP. services.tailscale does NOT export the
+    # assigned 100.x address at eval time, so Garage's listeners (modules/
+    # garage.nix) must read it from here — set per host in hosts/*.nix
+    # (doc 10 Phase 1 garage.nix skeleton note).
+    tailscaleIp = lib.mkOption {
+      type = lib.types.str;
+      example = "100.64.0.10";
+      description = "This node's tailscale0 overlay IP (TODO operator per host).";
+    };
+
+    zone = lib.mkOption {
+      type = lib.types.nullOr (lib.types.enum [
+        "onsite"
+        "offsite-1"
+        "offsite-2"
+      ]);
+      default = null;
+      description = "Garage replication zone label; null for the gateway (node-D has NO zone).";
+    };
+
+    role = lib.mkOption {
+      type = lib.types.enum [
+        "storage"
+        "gateway"
+      ];
+      description = "storage = holds data + ZFS pool + sanoid; gateway = capacity 0, no data pool.";
+    };
+  };
+
+  config = {
+    # --- nix / flakes --------------------------------------------------------
+    nix.settings = {
+      experimental-features = [
+        "nix-command"
+        "flakes"
+      ];
+      # Storage/gateway boxes have no other tenants; keep the build sandbox on.
+      sandbox = true;
+      trusted-users = [
+        "root"
+        "@wheel"
+      ];
+    };
+    # No automatic upgrades — convergence is an explicit, atomic `deploy-rs`
+    # push with magic-rollback (doc 09 ADR-4). Drift/auto-reboots would defeat
+    # the OS-as-code property.
+    system.autoUpgrade.enable = false;
+    nix.gc = {
+      automatic = true;
+      dates = "weekly";
+      options = "--delete-older-than 30d";
+    };
+
+    # --- bounded boot generations (atomic rollback target set) ---------------
+    boot.loader.systemd-boot.enable = lib.mkDefault true;
+    boot.loader.efi.canTouchEfiVariables = lib.mkDefault true;
+    boot.loader.systemd-boot.configurationLimit = 10;
+
+    # --- users ---------------------------------------------------------------
+    # Key-only admin user. Password login is disabled fleet-wide (see sshd).
+    users.mutableUsers = false;
+    users.users.ops = {
+      isNormalUser = true;
+      extraGroups = [ "wheel" ];
+      # TODO operator: paste your SSH public key(s) for break-glass admin login.
+      openssh.authorizedKeys.keys = [
+        # "ssh-ed25519 AAAA... operator@workstation"
+      ];
+    };
+    # root login over ssh is key-only too (see sshd); used by deploy-rs/
+    # nixos-anywhere. TODO operator: add the deploy key here.
+    users.users.root.openssh.authorizedKeys.keys = [
+      # "ssh-ed25519 AAAA... deploy@workstation"
+    ];
+    security.sudo.wheelNeedsPassword = false;
+
+    # --- openssh: key only, no passwords -------------------------------------
+    services.openssh = {
+      enable = true;
+      settings = {
+        PasswordAuthentication = false;
+        KbdInteractiveAuthentication = false;
+        PermitRootLogin = "prohibit-password"; # key-only root for deploy-rs
+      };
+      # ⚠️ Do NOT regenerate the host key after install — the node's age
+      #    identity is derived from /etc/ssh/ssh_host_ed25519_key (ssh-to-age)
+      #    and sops-nix decryption breaks if it changes (doc 09 §8).
+      hostKeys = [
+        {
+          type = "ed25519";
+          path = "/etc/ssh/ssh_host_ed25519_key";
+        }
+      ];
+    };
+
+    # --- firewall: nftables, tailnet + ssh only ------------------------------
+    # Every Garage listener binds tailscale0 only (modules/garage.nix); the
+    # firewall trusting only tailscale0 is the host-side half of the network
+    # isolation moat layer (doc 09 §3/§7). Binding 0.0.0.0 with a loose firewall
+    # would expose S3 beyond the tailnet and defeat the whole moat.
+    networking.nftables.enable = true;
+    networking.firewall = {
+      enable = true;
+      trustedInterfaces = [ "tailscale0" ];
+      # ssh on the physical NIC is the break-glass / nixos-anywhere path only;
+      # everything else (S3/RPC/admin 3900/3901/3903) is tailnet-only and thus
+      # covered by trustedInterfaces above, NOT opened here.
+      allowedTCPPorts = [ 22 ];
+      # Tailscale's own UDP discovery port is handled by services.tailscale
+      # (modules/tailscale.nix sets openFirewall).
+    };
+
+    # --- misc ----------------------------------------------------------------
+    time.timeZone = lib.mkDefault "UTC";
+    i18n.defaultLocale = "en_US.UTF-8";
+    environment.systemPackages = with pkgs; [
+      vim
+      curl
+      jq
+    ];
+
+    # TODO operator: set to the channel you locked in flake.nix at first install
+    # and DO NOT bump casually (state-version semantics).
+    system.stateVersion = "25.05";
+  };
+}
