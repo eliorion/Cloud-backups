@@ -19,6 +19,14 @@
 # show the garage user NOWHERE. Never `zfs allow garage …destroy/rollback`.
 { config, lib, ... }:
 {
+  # Which ZFS datasets sanoid snapshots (the moat). Default bpool/garage (the
+  # single-disk skeleton); doc-12 dual-disk nodes set [ "npool/garage" "dpool/garage" ].
+  options.fleet.sanoidDatasets = lib.mkOption {
+    type = lib.types.listOf lib.types.str;
+    default = [ "bpool/garage" ];
+    description = "ZFS datasets sanoid snapshots (the moat).";
+  };
+
   config = {
     # Native ZFS is enabled; the encrypted pool + datasets are declared in
     # disko-storage.nix. Here we add the snapshot policy + pool hygiene.
@@ -35,14 +43,15 @@
         autosnap = true; # take snapshots
         autoprune = true; # prune per policy (root/sanoid identity only)
       };
-      # Recurse so bpool/garage/meta and bpool/garage/data are both covered.
-      # ⚠️ meta and data are SEPARATE datasets and are NOT crash-consistent
-      #    together — a rollback must snapshot/roll BOTH and then
-      #    `garage repair blocks` to reconcile (doc 09 §10 ransomware path).
-      datasets."bpool/garage" = {
+      # Recurse so each pool's garage/meta + garage/data children are covered.
+      # ⚠️ meta and data are SEPARATE datasets (and, on dual-disk nodes, separate
+      #    POOLS npool/dpool) and are NOT crash-consistent together — a rollback
+      #    must snapshot/roll BOTH and then `garage repair blocks` to reconcile
+      #    (doc 09 §10 ransomware path).
+      datasets = lib.genAttrs config.fleet.sanoidDatasets (_: {
         useTemplate = [ "garage" ];
         recursive = true;
-      };
+      });
     };
 
     # --- pool hygiene --------------------------------------------------------

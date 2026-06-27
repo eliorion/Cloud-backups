@@ -1,51 +1,66 @@
 # garage-fleet SOPS config — a SEPARATE TRUST DOMAIN from the prod cluster.
 #
-# ⚠️ This is NOT the repo-root .sops.yaml. The backup tier deliberately uses its
-#    OWN age recipients (doc 09 §2/§8, ADR-1; doc 10 Phase 0). NEVER reuse the
-#    prod cluster's staging (age137z0k…) or production (age1heestk…) keys here,
-#    and never encrypt a fleet secret to a cluster key or vice versa.
+# ⚠️ This is NOT the prod cluster's .sops.yaml. The backup tier deliberately uses
+#    its OWN age recipients (doc 09 §2/§8, ADR-1; doc 10/13 Phase 0). NEVER reuse
+#    the prod cluster's staging (age137z0k…) or production (age1heestk…) keys
+#    here, and never encrypt a fleet secret to a cluster key or vice versa.
 #
-# Recipients below are PLACEHOLDERS. Run secrets/gen-secrets.sh to mint the
-# fleet age keypair, then paste the printed RECIPIENT in place of every
-# age1FLEET… below. Once each node is provisioned (nixos-anywhere seeds its
-# Ed25519 SSH host key), add that node's ssh-to-age recipient too and re-encrypt
-# the shared secrets so every node can decrypt the shared rpc_secret
-# (doc 10 Phase 1, "add node recipient + re-encrypt before first deploy").
+# Recipients here are managed by scripts/bootstrap-node (the TUI): it replaces the
+# *_PLACEHOLDER_REPLACE_ME tokens with the real fleet recipient and each node's
+# ssh-to-age recipient as you prepare a node, then re-encrypts (`sops updatekeys`).
+# To do it by hand: uncomment a node's `&node_X` anchor + its `*node_X`
+# references, fill the recipient, then run `sops updatekeys` on the affected files.
 #
 # Whole-file encryption (no encrypted_regex): these are flat key/value secret
-# files consumed by sops-nix, not k8s Secret manifests, so every value is
-# encrypted.
+# files consumed by sops-nix, not k8s Secret manifests, so EVERY value is
+# encrypted. sops encrypts to AGE recipients; the committed secrets/*.sops.yaml
+# files ARE the encrypted artifacts you push (CLAUDE.md: real sops files MUST be
+# committed — a flake copies only git-tracked files into the store).
 
 keys:
-  # TODO operator: replace with the fleet age RECIPIENT printed by
-  #                secrets/gen-secrets.sh (the public key, age1…).
-  - &fleet_workstation age1FLEET00000000000000000000000000000000000000000000000000000000
+  # Workstation/operator fleet identity (age-keygen). bootstrap-node fills this
+  # from $HOME/.config/sops/age/garage-fleet.txt.
+  - &fleet_workstation age10hwqc2pzwt8gmm6ve63mnmtfwmenzcm94hy8jksl5e8klpcweuestal7jn
 
-  # TODO operator: after provisioning, add each node's ssh-to-age recipient
-  #                (printed by gen-secrets.sh's helper, or
-  #                `ssh-keyscan <ip> | ssh-to-age`). Uncomment + fill:
-  # - &node_a age1NODEA0000000000000000000000000000000000000000000000000000000000
-  # - &node_b age1NODEB0000000000000000000000000000000000000000000000000000000000
-  # - &node_c age1NODEC0000000000000000000000000000000000000000000000000000000000
-  # - &node_d age1NODED0000000000000000000000000000000000000000000000000000000000
+  # Per-node recipients = ssh-to-age of each node's Ed25519 SSH host key, seeded
+  # at install. The bootstrap script uncomments + fills these per node.
+  - &node_a age1vsm4vna84mmc6pavpk8qjgytnm3lq0a3tghyvjnk8g659l84u3vs0cv9aa
+  - &node_b age1znuwj9nlx2x3czwkxj89achj73l47w2m90ha72v2rels5jse6qgsmfeqhm
+  #- &node_c age1NODEC_PLACEHOLDER_REPLACE_ME
+  #- &node_d age1NODED_PLACEHOLDER_REPLACE_ME
 
 creation_rules:
-  # Shared cluster-wide secrets (rpc_secret, admin/metrics tokens). Encrypt to
-  # the workstation key AND every node so any node can decrypt the shared
-  # rpc_secret (doc 10 Phase 0).
+  # Shared cluster secrets (rpc_secret, admin/metrics tokens). Encrypt to the
+  # workstation AND every node so any node can decrypt the shared rpc_secret.
   - path_regex: secrets/common\.sops\.ya?ml$
     key_groups:
       - age:
           - *fleet_workstation
-          # - *node_a
-          # - *node_b
-          # - *node_c
-          # - *node_d
+          - *node_a
+          - *node_b
+          #- *node_c
+          #- *node_d
 
-  # Per-node Tailscale auth keys (a cluster-join credential — doc 09 §8). One
-  # file per node keeps blast radius minimal; encrypt to workstation + that node.
-  - path_regex: secrets/.*-tailscale\.sops\.ya?ml$
+  # Per-node Tailscale auth keys — a cluster-join credential (doc 09 §8). One file
+  # PER NODE, encrypted to ONLY its node + the workstation, so a leaked tag:garage
+  # key has minimal blast radius.
+  - path_regex: secrets/node-a-tailscale\.sops\.ya?ml$
     key_groups:
       - age:
           - *fleet_workstation
-          # - *node_a   # (and the matching node for that file)
+          - *node_a
+  - path_regex: secrets/node-b-tailscale\.sops\.ya?ml$
+    key_groups:
+      - age:
+          - *fleet_workstation
+          - *node_b
+  - path_regex: secrets/node-c-tailscale\.sops\.ya?ml$
+    key_groups:
+      - age:
+          - *fleet_workstation
+          #- *node_c
+  - path_regex: secrets/node-d-tailscale\.sops\.ya?ml$
+    key_groups:
+      - age:
+          - *fleet_workstation
+          #- *node_d

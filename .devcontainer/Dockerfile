@@ -14,11 +14,15 @@ RUN curl -sSLf https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh && \
 #    size for rebuild-speed, move the Nix install into scripts/setup and mount a
 #    /nix volume instead (advanced — see .devcontainer/devcontainer.json note).
 USER vscode
+# filter-syscalls=false: the build runs in a nested container whose seccomp
+# profile blocks the seccomp() syscall, so Nix's own BPF sandbox fails to load
+# ("unable to load seccomp BPF program: Invalid argument"). Disable it for the
+# install build and persist it in nix.conf for runtime builds.
 RUN curl -L https://nixos.org/nix/install -o /tmp/nix-install.sh && \
-    sh /tmp/nix-install.sh --no-daemon && \
+    NIX_CONFIG='filter-syscalls = false' sh /tmp/nix-install.sh --no-daemon && \
     rm /tmp/nix-install.sh && \
     mkdir -p /home/vscode/.config/nix && \
-    printf 'experimental-features = nix-command flakes\n' \
+    printf 'experimental-features = nix-command flakes\nfilter-syscalls = false\n' \
       >> /home/vscode/.config/nix/nix.conf && \
     echo '. /home/vscode/.nix-profile/etc/profile.d/nix.sh' >> /home/vscode/.bashrc && \
     echo '. /home/vscode/.nix-profile/etc/profile.d/nix.sh' >> /home/vscode/.zshrc

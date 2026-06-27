@@ -54,9 +54,12 @@
     #    lost node fleet = unrecoverable raw-send vault unless an OFFLINE copy
     #    exists in two physical locations. Owner root, mode 0400 — never garage.
     #
-    # The gateway (node-D) has no encrypted data pool, so this secret is gated to
-    # storage nodes via the role check; node-D never references it.
-    secrets."zfs-passphrase" = lib.mkIf (config.fleet.role == "storage") {
+    # The gateway (node-D) has no encrypted data pool; storage nodes that PROMPT-
+    # unlock (fleet.zfsAutoUnlock = false, the offsite default — doc 12/13) also
+    # persist NO passphrase on the box. So this secret exists ONLY when
+    # fleet.zfsAutoUnlock = true (auto-unlock at boot from sops). node-D and every
+    # prompt-unlock node never reference it.
+    secrets."zfs-passphrase" = lib.mkIf config.fleet.zfsAutoUnlock {
       sopsFile = ../secrets/common.sops.yaml;
       owner = "root";
       group = "root";
