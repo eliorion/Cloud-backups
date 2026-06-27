@@ -22,8 +22,18 @@ let
   # datasets (disko-storage.nix). Gateway uses small local dirs (doc 10 Phase 3).
   metaDir = "/srv/garage/meta";
   dataDir = "/srv/garage/data";
+
+  # Storage nodes may span multiple disks (e.g. NVMe ssd + HDD bulk, doc 12):
+  # fleet.dataDirs = [{path,capacity}] → Garage multi-`data_dir`. null = single dir.
+  dataPaths = if cfg.dataDirs != null then map (d: d.path) cfg.dataDirs else [ dataDir ];
 in
 {
+  options.fleet.dataDirs = lib.mkOption {
+    type = lib.types.nullOr (lib.types.listOf (lib.types.attrsOf lib.types.str));
+    default = null;
+    description = "Multi-disk Garage data_dir list [{path,capacity}]; null = single dataDir.";
+  };
+
   config = {
     services.garage = {
       enable = true;
@@ -34,7 +44,7 @@ in
       package = pkgs.garage_2;
       settings = {
         metadata_dir = metaDir;
-        data_dir = dataDir;
+        data_dir = if cfg.dataDirs != null then cfg.dataDirs else dataDir;
         db_engine = "lmdb"; # required default for replication_factor >= 2
 
         # IDENTICAL on every node or the cluster will not form (doc 09 §5).
@@ -92,6 +102,14 @@ in
       "d ${metaDir} 0700 garage garage -"
       "d ${dataDir} 0700 garage garage -"
     ];
+
+    # Storage nodes prompt-unlock their encrypted datasets POST-boot (doc 12), so
+    # Garage must NOT start until meta + every data dir is a real mountpoint — else
+    # it would write into empty unmounted dirs under the still-locked pool. The
+    # gateway has no encrypted pool, so this condition is storage-only.
+    systemd.services.garage.unitConfig = lib.mkIf (!isGateway) {
+      ConditionPathIsMountPoint = [ metaDir ] ++ dataPaths;
+    };
 
     # The Garage S3 region NixOS option is set above; the LAYOUT (zone /
     # capacity / --gateway) is applied imperatively with `garage layout assign`

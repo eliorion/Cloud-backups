@@ -7,6 +7,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # --- mise: trust + install the pinned tools ----------------------------------
 /usr/local/bin/mise trust "$ROOT/mise.toml" && /usr/local/bin/mise install
+# Put mise-managed tools (node, uv, ...) on PATH for the rest of this script;
+# .bashrc activation does not apply to this non-interactive run.
+eval "$(/usr/local/bin/mise activate bash --shims)"
 
 # --- Claude Code -------------------------------------------------------------
 curl -fsSL https://claude.ai/install.sh | bash

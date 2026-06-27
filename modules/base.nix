@@ -37,6 +37,17 @@
       ];
       description = "storage = holds data + ZFS pool + sanoid; gateway = capacity 0, no data pool.";
     };
+
+    # true  = auto-unlock the encrypted data pool from a sops-persisted passphrase
+    #         at boot (onsite convenience; weaker whole-box-theft story).
+    # false = prompt-unlock post-boot via `zfs load-key` (offsite default, doc 12).
+    # Gates the sops `zfs-passphrase` secret (modules/sops.nix) and which unlock
+    # path hosts/disko-node-*.nix wires. See documentations/13 Phase 0.
+    zfsAutoUnlock = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "true = auto-unlock data pool from a sops passphrase at boot; false = prompt-unlock post-boot (offsite default).";
+    };
   };
 
   config = {
@@ -74,15 +85,15 @@
     users.users.ops = {
       isNormalUser = true;
       extraGroups = [ "wheel" ];
-      # TODO operator: paste your SSH public key(s) for break-glass admin login.
+      # Operator break-glass admin key (Mac, forwarded via ssh-agent into the devcontainer).
       openssh.authorizedKeys.keys = [
-        # "ssh-ed25519 AAAA... operator@workstation"
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDW1Q2aJgg7HzWHshxgu2alaNuSQ4JV23PSDoP9bY1qu skh@MacBook-Air-de-samuel-3.local"
       ];
     };
     # root login over ssh is key-only too (see sshd); used by deploy-rs/
-    # nixos-anywhere. TODO operator: add the deploy key here.
+    # nixos-anywhere. Same operator Mac key (deploy/break-glass).
     users.users.root.openssh.authorizedKeys.keys = [
-      # "ssh-ed25519 AAAA... deploy@workstation"
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDW1Q2aJgg7HzWHshxgu2alaNuSQ4JV23PSDoP9bY1qu skh@MacBook-Air-de-samuel-3.local"
     ];
     security.sudo.wheelNeedsPassword = false;
 

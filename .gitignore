@@ -4,10 +4,16 @@ key.txt
 graphify-out/.graphify_*
 graphify-out/cache/
 
+# Never commit the private keys
+private-keys/
 
 # Never commit the workstation/local plaintext ZFS key seeded into install.
 local-zfs.key
 *.key
+
+# Never commit PLAINTEXT secret values (e.g. gen-secrets output notes). The real
+# values live ENCRYPTED in secrets/*.sops.yaml; keep break-glass copies OFFLINE.
+*.real-value
 
 # Real sops files are SOPS-ENCRYPTED, so they MUST be committed — that is the
 # standard sops-nix+flakes pattern and matches how the prod repo handles its

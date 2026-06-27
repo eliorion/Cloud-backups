@@ -26,7 +26,9 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
 - `flake.nix` — inputs + `nixosConfigurations` (node-a/b/c/d) + `deploy-rs` node map
 - `modules/` — `base.nix` (ssh/nftables/users/nix), `sops.nix` (sops-nix wiring),
   `garage.nix` (`services.garage` + garage.toml, tailnet listeners),
-  `zfs-sanoid.nix` (ZFS + sanoid RO snapshot moat + autoScrub), `tailscale.nix`
+  `zfs-sanoid.nix` (ZFS + sanoid RO snapshot moat + autoScrub), `tailscale.nix`,
+  `workstation.nix` (node-A ONLY: rootless-podman devcontainer host for DevPod —
+  unprivileged `dev` user, ARC cap; co-located with the DR Garage role)
 - `hosts/` — `node-a/-b/-c/-d.nix`, `disko-storage.nix` (encrypted ZFS pool, A/B/C),
   `disko-gateway.nix` (boot+root only, greenfield D rebuild)
 - `secrets/` — `gen-secrets.sh`, `common.sops.yaml.example`,

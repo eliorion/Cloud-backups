@@ -2,13 +2,14 @@
 # deploy-rs, disko) comes from `nix run`/the flake; mise carries the everyday
 # CLIs used by documentations/12. Mirrors the main k3s workspace's mise setup.
 [tools]
+node = "lts"                         # Node.js >=18, required by caveman install (scripts/setup)
 sops = "latest"
 age = "latest"
 jq = "latest"
 shellcheck = "latest"
-uv = "latest"         # for graphify (scripts/setup)
+uv = "latest"                        # for graphify (scripts/setup)
 gh = "latest"
-
+"github:Mic92/ssh-to-age" = "latest"
 # --- tasks: thin wrappers over the doc-12 workstation steps -------------------
 [tasks.lock]
 description = "Resolve flake inputs -> flake.lock (no build; arch-independent)"

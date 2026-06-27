@@ -29,6 +29,12 @@ in
     description = "Enable Tailscale subnet-router / exit-node proxy role (offsite B/C only).";
   };
 
+  options.fleet.advertiseRoutes = lib.mkOption {
+    type = lib.types.listOf lib.types.str;
+    default = [ ];
+    description = "Subnet routes this proxy advertises (scraper-egress role), e.g. [\"192.168.1.0/24\"]. Approve in the Tailscale ACL.";
+  };
+
   config = {
     services.tailscale = {
       enable = true;
@@ -47,9 +53,12 @@ in
         ]
         ++ lib.optionals isProxy [
           "--advertise-exit-node"
-          # TODO operator: advertise the subnet route(s) this proxy serves, e.g.
-          # "--advertise-routes=192.168.x.0/24" — must match the scraper-egress
-          # role this node carries (doc 10 Phase 2). Approve routes in the ACL.
+        ]
+        # Subnet route(s) for the scraper-egress role come from fleet.advertiseRoutes
+        # (set per host). Must match the role this node carries; approve in the ACL
+        # (doc 10 Phase 2). Empty list → no --advertise-routes flag emitted.
+        ++ lib.optionals (isProxy && cfg.advertiseRoutes != [ ]) [
+          "--advertise-routes=${lib.concatStringsSep "," cfg.advertiseRoutes}"
         ];
     };
 
