@@ -15,7 +15,8 @@ cluster.
 - `documentations/09-garage-backup-cluster.md` — design + decision records (the *why*).
 - `documentations/10-garage-backup-implementation-plan.md` — phased runbook (the *how*).
 
-Read those first. This README is the fleet-side quickstart only.
+Read those first. This README is the fleet-side quickstart only. The whole node
+lifecycle is driven by one tool — **`scripts/fleet`** (see Quickstart below).
 
 ---
 
@@ -23,10 +24,13 @@ Read those first. This README is the fleet-side quickstart only.
 
 ```
 garage-fleet/
-  flake.nix                 # inputs + nixosConfigurations + deploy-rs nodes
+  scripts/fleet             # ONE entrypoint: new / install / deploy / status (this doc)
+  flake.nix                 # inputs; a `hosts` attrset derives nixosConfigurations
+                            #   (+ per-node `-install` variants) and the deploy-rs map
   .sops.yaml                # FLEET recipients (separate from the prod cluster's)
+  private-keys/             # gitignored: fleet age key + per-node SSH host keys
   secrets/
-    gen-secrets.sh                      # mint fleet age key + rpc/admin/metrics
+    gen-secrets.sh                      # (legacy) manual fleet-key + token minting
     common.sops.yaml.example            # TEMPLATE: rpc_secret + admin/metrics tokens
     node-tailscale.sops.yaml.example    # TEMPLATE: per-node tag:garage auth key
   modules/
@@ -35,18 +39,21 @@ garage-fleet/
     garage.nix      # services.garage + garage.toml, listeners on the tailnet
     zfs-sanoid.nix  # ZFS + sanoid RO snapshot moat + autoScrub (storage nodes)
     tailscale.nix   # services.tailscale, authkey, tags, proxy toggle
+    workstation.nix # node-A ONLY: rootless-podman DevPod host (unprivileged dev user)
   hosts/
-    node-a.nix      # onsite   storage
+    node-a.nix      # onsite   storage + workstation
     node-b.nix      # offsite-1 storage + proxy
     node-c.nix      # offsite-2 storage + proxy
     node-d.nix      # gateway  (capacity 0, no data, no zone)
-    disko-storage.nix  # encrypted ZFS pool (A/B/C)
+    disko-node-a.nix   # node-A: unencrypted NVMe wpool (dev) + encrypted HDD dpool
+    disko-node-b.nix   # node-B: encrypted NVMe npool + encrypted HDD dpool
+    disko-storage.nix  # node-C: single encrypted ZFS pool
     disko-gateway.nix  # simple boot+root, no data pool (greenfield D rebuild only)
 ```
 
-Each storage host imports `disko-storage` + `zfs-sanoid` + (via the flake)
-`garage` + `tailscale`. The gateway imports neither `disko-storage` nor
-`zfs-sanoid`.
+Each storage host imports its disko file + `zfs-sanoid` + (via the flake)
+`garage` + `tailscale`; node-A also imports `workstation.nix`. The gateway
+imports no disko and no `zfs-sanoid`.
 
 ---
 
@@ -66,7 +73,34 @@ Commit the resulting `flake.lock`. Renovate then keeps the inputs current.
 
 ---
 
+## Quickstart — `scripts/fleet`
+
+`scripts/fleet` is the single workstation entrypoint for the node lifecycle (it
+replaced the old `bootstrap-node` + `deploy-node`). Run it bare for a TUI, or:
+
+```bash
+./scripts/fleet                                    # TUI menu (status + actions)
+./scripts/fleet new    node-a                      # §0: secrets + scaffold (idempotent; --force regens)
+./scripts/fleet config tailnet <name>              # set the deploy MagicDNS tailnet
+./scripts/fleet secrets                            # verify-all-encrypted + git add; then git commit
+./scripts/fleet install node-a root@<installer-ip> # §1: remote provision (nixos-anywhere)
+./scripts/fleet deploy  node-a                     # §2: apply a config change (deploy-rs + auto-rollback)
+./scripts/fleet status                             # readiness + lifecycle state per node
+```
+
+`new`/`secrets`/`status` run in the devcontainer (sops + age, **no nix**);
+`install`/`deploy` need **nix** — run them from a nix host. Without `--force`,
+`new` skips whatever already exists. Sections 0–2 below are what these commands
+do under the hood (and the console fallback).
+
+---
+
 ## 0. Secret bootstrap (doc 10 Phase 0)
+
+`./scripts/fleet new <node>` does all of the below — idempotently — minting the
+fleet age key, the shared secrets, the node's SSH host key (→ `private-keys/`),
+its `ssh-to-age` recipient (→ `.sops.yaml`), the Tailscale authkey, and
+`sops updatekeys`. The manual equivalent:
 
 ```bash
 cd garage-fleet
@@ -97,23 +131,33 @@ on `3900,3901,3903`; `tag:k8s → tag:garage` on **`tcp:3900` only** (never RPC
 
 ## 1. Provision (disko + nixos-anywhere) — doc 10 Phase 1/2
 
-Boot each new node (A/B/C) into a rescue/live image with SSH-as-root, then from
-the workstation:
+Boot each new node (A/B/C) into a NixOS live/installer image with SSH-as-root, then:
+
+```bash
+./scripts/fleet install node-a root@<installer-ip>
+```
+
+`fleet install` prompts for the ZFS passphrase, uploads it to the installer's RAM
+only (`--disk-encryption-keys`, a tmpfs file — never written to disk), seeds the
+SSH host key (`--extra-files`), runs nixos-anywhere against the `.#node-a-install`
+variant, then restores `keylocation=prompt` post-boot over `ssh`. In effect:
 
 ```bash
 nix run github:nix-community/nixos-anywhere -- \
-  --flake .#node-a \
-  --disk-encryption-keys /tmp/zfs.key ./local-zfs.key \
-  --extra-files ./node-a-extra \   # seeds /etc/ssh/ssh_host_ed25519_key
-  --generate-hardware-config nixos-generate-config hosts/node-a-hardware.nix \
-  --target-host root@<node-a-rescue-ip>
+  --flake .#node-a-install \
+  --disk-encryption-keys /tmp/fleet-zfs.key <passphrase-tmpfile> \
+  --extra-files <hostkey-tree> \   # seeds /etc/ssh/ssh_host_ed25519_key
+  root@<installer-ip>
+# extra args pass through after `--`, e.g.:
+#   ./scripts/fleet install node-a root@<ip> -- --generate-hardware-config nixos-generate-config hosts/node-a-hardware.nix
 ```
 
-After install, **add that node's `ssh-to-age` recipient to `.sops.yaml` and
-re-encrypt the shared secrets** before the first `deploy-rs` push — otherwise
-activation can't decrypt and `switch` fails (doc 09 §8). Then bring up the Garage
-layout imperatively (`garage layout assign … -z <zone> -c <bytes>`,
-`garage layout apply --version <prev+1>` — exactly `prev+1`, once; doc 09 §5).
+`fleet new` already added the node's `ssh-to-age` recipient to `.sops.yaml` and
+re-encrypted the shared secrets, so the box can decrypt at activation (doc 09 §8)
+— just commit before installing (a flake copies only git-tracked files). Then
+bring up the Garage layout imperatively (`garage layout assign … -z <zone>
+-c <bytes>`, `garage layout apply --version <prev+1>` — exactly `prev+1`, once;
+doc 09 §5; `fleet guide <node>` prints the exact commands).
 
 **node-D is already in production** — reconfigure it **additively** (doc 10
 Phase 3): do **not** import `disko-gateway.nix` in place, add only
@@ -124,7 +168,8 @@ Phase 3): do **not** import `disko-gateway.nix` in place, add only
 ## 2. Deploy (deploy-rs, magic rollback) — doc 09 ADR-4
 
 ```bash
-nix run github:serokell/deploy-rs -- .#node-a   # or .#node-b / -c / -d
+./scripts/fleet deploy node-a    # runs: nix run github:serokell/deploy-rs -- .#node-a
+./scripts/fleet rollback node-a  # escape hatch: switch the box to its previous generation
 ```
 
 deploy-rs **magic rollback** auto-reverts a bad `tailscaled`/firewall change on a
@@ -140,7 +185,7 @@ per-host SSH identities in `~/.ssh/config` keyed by the Tailscale MagicDNS name
 
 | Where | Placeholder |
 |---|---|
-| `flake.nix` deploy nodes | `<tailnet>` MagicDNS name (×4) |
+| `flake.nix` | `<tailnet>` MagicDNS name — set with `./scripts/fleet config tailnet <name>` |
 | `.sops.yaml` | fleet recipient `age1FLEET…`; each node's `ssh-to-age` recipient after install |
 | `modules/base.nix` | `ops` + `root` SSH authorized keys; `system.stateVersion` |
 | `modules/garage.nix` | `package = pkgs.garage_2` attr name on your nixpkgs; `bootstrap_peers` (peer pubkey@overlay:3901) |

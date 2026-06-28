@@ -37,7 +37,21 @@
 #   Until then treat /tmp/zfs.key as the install seed only and expect a manual
 #   `zfs load-key` after any reboot. The at-rest-encryption claim (media-only
 #   theft) holds only once the key lives encrypted-at-rest via sops-nix, not /tmp.
-{ lib, ... }:
+{ config, lib, ... }:
+let
+  # keylocation="prompt" at runtime (the prompt-unlock fleet default, CLAUDE.md);
+  # a tmpfs file:// path ONLY during a remote nixos-anywhere install (set by the
+  # `<node>-install` flake variant, restored to prompt post-boot by scripts/fleet,
+  # modules/base.nix). This REPLACES the old hardcoded file:///tmp/zfs.key seed —
+  # which never survived a reboot — so node-C now prompt-unlocks like A/B. For an
+  # AUTO-unlock offsite node, wire fleet.zfsAutoUnlock + the sops zfs-passphrase
+  # secret instead (modules/sops.nix), not a /tmp seed.
+  garageKeylocation =
+    if config.fleet.zfsInstallKeyfile != null then
+      "file://${config.fleet.zfsInstallKeyfile}"
+    else
+      "prompt";
+in
 {
   disko.devices = {
     disk = {
@@ -108,15 +122,7 @@
           options = {
             encryption = "aes-256-gcm";
             keyformat = "passphrase";
-            # INSTALL SEED ONLY — see the KEY PERSISTENCE note in the header.
-            # Seeded by nixos-anywhere --disk-encryption-keys at pool creation
-            # (doc 10 Phase 1); /tmp is tmpfs so this is GONE after reboot. Wire
-            # the sops-nix `zfs-passphrase` secret + a boot `zfs load-key`
-            # (modules/sops.nix) before relying on reboot-unlock. See also the
-            # BOOT-TRUST CAVEAT for auto-unlock implications. TODO operator: for a
-            # LOCKED offsite node, change to keylocation = "prompt" and wire
-            # initrd-SSH / Tailscale unlock instead.
-            keylocation = "file:///tmp/zfs.key";
+            keylocation = garageKeylocation; # prompt at runtime; tmpfs file:// only at install
           };
         };
         # Garage metadata (LMDB) — small recordsize. Size for LMDB + Garage

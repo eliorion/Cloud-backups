@@ -18,7 +18,17 @@
 # ⚠️ disko create-mode DESTROYS both disks. Confirm device paths with `lsblk` on
 #    the live USB before formatting — node-A's disks MAY differ (e.g. /dev/sdb,
 #    or a single NVMe). Edit the `device =` lines below.
-{ ... }:
+{ config, ... }:
+let
+  # keylocation="prompt" at runtime (the moat); a tmpfs file:// path ONLY during
+  # a remote nixos-anywhere install (set by the `<node>-install` flake variant,
+  # restored to prompt post-boot by scripts/fleet). See modules/base.nix.
+  garageKeylocation =
+    if config.fleet.zfsInstallKeyfile != null then
+      "file://${config.fleet.zfsInstallKeyfile}"
+    else
+      "prompt";
+in
 {
   disko.devices = {
     disk = {
@@ -115,7 +125,7 @@
             options = {
               encryption = "aes-256-gcm";
               keyformat = "passphrase";
-              keylocation = "prompt"; # typed at format + every unlock
+              keylocation = garageKeylocation; # prompt at runtime; tmpfs file:// only at install
               mountpoint = "none"; # container only
             };
           };

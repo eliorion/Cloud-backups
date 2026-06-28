@@ -23,14 +23,23 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
 
 ## Repo layout
 
-- `flake.nix` — inputs + `nixosConfigurations` (node-a/b/c/d) + `deploy-rs` node map
+- `scripts/fleet` — **single workstation entrypoint** for the node lifecycle
+  (`new`/`install`/`deploy`/`rollback`/`status`/`secrets`/`config`); replaced the
+  former `bootstrap-node` + `deploy-node`. `private-keys/` (gitignored) holds the
+  fleet age key + per-node SSH host keys; `.fleet/` (gitignored) holds deploy markers.
+- `flake.nix` — inputs; a `hosts` attrset DERIVES `nixosConfigurations` (+ a per-node
+  `-install` variant each) and the `deploy-rs` node map. `node-d` is commented out of
+  `hosts` until its hardware-config is wired (else `nix flake check` fails)
 - `modules/` — `base.nix` (ssh/nftables/users/nix), `sops.nix` (sops-nix wiring),
   `garage.nix` (`services.garage` + garage.toml, tailnet listeners),
   `zfs-sanoid.nix` (ZFS + sanoid RO snapshot moat + autoScrub), `tailscale.nix`,
   `workstation.nix` (node-A ONLY: rootless-podman devcontainer host for DevPod —
   unprivileged `dev` user, ARC cap; co-located with the DR Garage role)
-- `hosts/` — `node-a/-b/-c/-d.nix`, `disko-storage.nix` (encrypted ZFS pool, A/B/C),
-  `disko-gateway.nix` (boot+root only, greenfield D rebuild)
+- `hosts/` — `node-a/-b/-c/-d.nix`; `disko-node-a.nix` (A: unencrypted NVMe wpool +
+  encrypted HDD dpool), `disko-node-b.nix` (B: encrypted npool + dpool),
+  `disko-storage.nix` (C: single encrypted pool), `disko-gateway.nix` (boot+root
+  only, greenfield D rebuild). Encrypted datasets use `keylocation=prompt` at
+  runtime, `file://${fleet.zfsInstallKeyfile}` only under the `-install` variant.
 - `secrets/` — `gen-secrets.sh`, `common.sops.yaml.example`,
   `node-tailscale.sops.yaml.example`
 - `.sops.yaml` — **FLEET** age recipients (separate trust domain from prod)
@@ -42,12 +51,18 @@ already in production** — reconfigure it **additively** (do not import
 
 ## Conventions
 
-- **deploy-rs, not Flux**: `nix run github:serokell/deploy-rs -- .#node-a`. Magic
+- **Use `scripts/fleet`** for routine work: `fleet new <node>` (secrets + scaffold,
+  idempotent, `--force` regens), `fleet install <node> root@host` (remote
+  nixos-anywhere + transient tmpfs ZFS-passphrase feed → restores prompt-unlock),
+  `fleet deploy <node>` (deploy-rs), `fleet config tailnet <name>`, `fleet secrets`,
+  `fleet status`. `new`/`secrets` need sops+age (no nix); `install`/`deploy` need nix.
+- **deploy-rs, not Flux** (`fleet deploy <node>` wraps it): `nix run github:serokell/deploy-rs -- .#node-a`. Magic
   rollback auto-reverts a bad firewall/tailscaled change in ~30s, but only once a
   *prior* generation was also deploy-rs-deployed — do the first post-install
   deploy with console / initrd-SSH fallback. Per-host SSH identities go in
   `~/.ssh/config` keyed by the Tailscale MagicDNS name.
-- **Provision** with disko + nixos-anywhere (`--flake .#node-a`,
+- **Provision** with disko + nixos-anywhere (`fleet install <node> root@host` wraps
+  this against the `.#<node>-install` variant) (`--flake .#node-a`,
   `--disk-encryption-keys`, `--extra-files` seeds the SSH host key,
   `--generate-hardware-config`). After install, **add that node's `ssh-to-age`
   recipient to `.sops.yaml` and re-encrypt the shared secrets before the first

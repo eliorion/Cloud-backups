@@ -26,27 +26,34 @@ converted) for nodes A and B.
 
 ---
 
-## Quickstart — the bootstrap TUI (`scripts/bootstrap-node`)
+## Quickstart — the lifecycle tool (`scripts/fleet`)
 
-A plain-bash interactive menu drives the **workstation-side, scriptable** parts
-of this runbook and prints the rest. Run it from the repo root:
+`scripts/fleet` is the single workstation entrypoint for the whole node lifecycle
+(it replaces the former `bootstrap-node` + `deploy-node`). Run it bare for a TUI,
+or use subcommands:
 
 ```bash
-./scripts/bootstrap-node
+./scripts/fleet                                   # TUI menu (status + actions)
+./scripts/fleet new    node-a                     # scaffold + secrets (idempotent; --force regens)
+./scripts/fleet install node-a root@<installer-ip># REMOTE provision (nixos-anywhere)
+./scripts/fleet deploy  node-a                    # apply a config change (deploy-rs + auto-rollback)
+./scripts/fleet status                            # readiness + lifecycle state per node
 ```
 
-| Menu | Does (automated) | You still do (it prints these) |
+| Command | Does (automated) | You still do |
 |---|---|---|
-| **1 Fleet secrets** | fleet age key; fills `.sops.yaml` recipient; generates + sops-encrypts `common.sops.yaml` (rpc/admin/metrics, **no** zfs-passphrase) — secrets never echoed | mint `tag:garage` auth keys + set the Tailscale ACL (admin console); copy the fleet age key to break-glass |
-| **2 Prepare node** | per-node SSH host key → `ssh-to-age` recipient → inserts it into `.sops.yaml` → encrypts the node authkey → `sops updatekeys` | fill `hostId`/`dataDirs`/`advertiseRoutes`; confirm disk paths on the box; stage the payload USB |
-| **3 Secrets** | list / `sops` edit / **verify-all-encrypted + git-stage** / `updatekeys` | `git commit && git push` the encrypted files |
-| **4 Validate** | `nix flake lock` + `check` + prints the garage version | fix the 2.1.0-vs-2.3.0 pin if needed |
-| **5 On-box guide** | prints the live-USB runbook for A or B (disko → install → unlock → layout) | run it **on the box** |
+| `new <node>` | fleet age key; `.sops.yaml` recipient; `common.sops.yaml` (rpc/admin/metrics, **no** zfs-passphrase); per-node SSH host key → `private-keys/` → `ssh-to-age` recipient → `.sops.yaml`; node authkey; `sops updatekeys`. For a **brand-new** node also scaffolds `hosts/*.nix` + disko + the `flake.nix` entry. Re-running SKIPS what exists | mint the `tag:garage` auth key + set the Tailscale ACL; copy the fleet age key to break-glass; fill the scaffolded `hostId` / device paths / capacities |
+| `install <node> root@host` | REMOTE `nixos-anywhere`: feeds the ZFS passphrase to the installer's RAM (`--disk-encryption-keys`), seeds the host key (`--extra-files`), installs `.#<node>-install`, then restores `keylocation=prompt` over ssh | confirm `lsblk` device paths; type the passphrase; apply the Garage layout once (`fleet guide`) |
+| `deploy <node>` | `deploy-rs` push with **magic-rollback** (auto-reverts a change that breaks reachability). First push warns: no rollback baseline yet | keep a console reachable for that **first** push |
+| `secrets` | list / `sops` edit / **verify-all-encrypted + git-stage** / `updatekeys` | `git commit && git push` the encrypted files |
+| `config tailnet <name>` | writes the MagicDNS tailnet into `flake.nix` (deploy targetHosts) | — |
 
-The script is the convenience layer; the sections below are the source of truth
-(and what menu 5 prints). Everything the script can't reach — physical USB boot,
-on-box `disko`/`nixos-install`/`zfs load-key`/`garage layout`, the Tailscale
-console, break-glass custody — is called out as **MANUAL** here and in its output.
+Prefer the **remote** path (`install`). Validate the flake on a nix host with
+`nix flake check`. The on-box console/USB steps in the sections below are the
+**fallback** when a node can't be reached over the network for `nixos-anywhere`
+(also printed by `fleet guide <node>`), and remain the source of truth for what
+happens on the box — physical USB boot, `disko`/`nixos-install`/`zfs load-key`/
+`garage layout`, the Tailscale console, and break-glass custody are **MANUAL**.
 
 ---
 

@@ -60,55 +60,75 @@
         ./modules/garage.nix
       ];
 
-      mkHost =
-        hostModule:
+      # THE source of truth for the fleet's nodes. `scripts/fleet` adds ONE line
+      # here when it scaffolds a new node; nixosConfigurations + the deploy map
+      # below are DERIVED from this, so a new node needs no other flake edit.
+      hosts = {
+        node-a = ./hosts/node-a.nix;
+        node-b = ./hosts/node-b.nix;
+        node-c = ./hosts/node-c.nix;
+        # node-d is ALREADY IN PRODUCTION and reconfigured ADDITIVELY (doc 10
+        # Phase 3): hosts/node-d.nix imports no disko and has no hardware-config
+        # yet, so it defines no root fileSystem and would make `nix flake check`
+        # fail. Re-enable it here once its real hardware-config is wired (uncomment
+        # the imports in hosts/node-d.nix); `scripts/fleet` then manages it too.
+        # node-d = ./hosts/node-d.nix;
+      };
+
+      # MagicDNS tailnet for the deploy-rs targetHosts. TODO operator
+      # (`scripts/fleet config tailnet <name>`): replace <tailnet>.
+      tailnet = "<tailnet>";
+
+      # Install-only tmpfs keyfile (see modules/base.nix `fleet.zfsInstallKeyfile`).
+      # The `<node>-install` variants set it so nixos-anywhere can format the
+      # encrypted ZFS pools non-interactively; runtime configs keep prompt-unlock.
+      installKeyfile = "/tmp/fleet-zfs.key";
+
+      mkSystem =
+        modules:
         lib.nixosSystem {
           inherit system;
-          modules = commonModules ++ [ hostModule ];
+          modules = commonModules ++ modules;
         };
     in
     {
-      nixosConfigurations = {
-        node-a = mkHost ./hosts/node-a.nix;
-        node-b = mkHost ./hosts/node-b.nix;
-        node-c = mkHost ./hosts/node-c.nix;
-        node-d = mkHost ./hosts/node-d.nix;
-      };
-
-      # deploy-rs node map. targetHost is the Tailscale MagicDNS name — set per
-      # host below. deploy-rs + per-host SSH identities are configured in the
-      # operator's ~/.ssh/config keyed by MagicDNS name (ADR-4 caveat b: neither
-      # deploy-rs nor colmena handle per-host/passphrase keys themselves).
+      # node-X       = runtime config, deployed by deploy-rs (keylocation=prompt).
+      # node-X-install = same + a tmpfs ZFS keyfile path, used ONCE by the remote
+      #                  nixos-anywhere format (`scripts/fleet install`); restored
+      #                  to prompt-unlock right after first boot.
       #
       # ⚠️ magic-rollback only protects you once a PRIOR generation was also
-      #    deployed by deploy-rs. The first push after nixos-anywhere has no
-      #    canary baseline — do that first reachable-config deploy with
-      #    console / initrd-SSH fallback available (ADR-4 caveat a, doc 10 P1).
+      #    deployed by deploy-rs. The first push after nixos-anywhere has no canary
+      #    baseline — do that first reachable-config deploy with console /
+      #    initrd-SSH fallback available (ADR-4 caveat a, doc 10 P1).
+      nixosConfigurations =
+        lib.mapAttrs (_name: mod: mkSystem [ mod ]) hosts
+        // lib.concatMapAttrs (name: mod: {
+          "${name}-install" = mkSystem [
+            mod
+            { fleet.zfsInstallKeyfile = installKeyfile; }
+          ];
+        }) hosts;
+
+      # deploy-rs node map, derived from `hosts`. targetHost is the Tailscale
+      # MagicDNS name; per-host SSH identities go in the operator's ~/.ssh/config
+      # keyed by MagicDNS name (ADR-4 caveat b: neither deploy-rs nor colmena
+      # handle per-host/passphrase keys themselves).
       deploy = {
         magicRollback = true;
         autoRollback = true;
         sshUser = "root";
         user = "root";
 
-        nodes =
-          let
-            mkNode = name: hostname: {
-              inherit hostname;
-              profiles.system = {
-                path = deploy-rs.lib.${system}.activate.nixos self.nixosConfigurations.${name};
-              };
-            };
-          in
-          {
-            # TODO operator: replace <tailnet> with your MagicDNS tailnet name.
-            node-a = mkNode "node-a" "node-a.<tailnet>.ts.net";
-            node-b = mkNode "node-b" "node-b.<tailnet>.ts.net";
-            node-c = mkNode "node-c" "node-c.<tailnet>.ts.net";
-            node-d = mkNode "node-d" "node-d.<tailnet>.ts.net";
-          };
+        nodes = lib.mapAttrs (name: _mod: {
+          hostname = "${name}.${tailnet}.ts.net";
+          profiles.system.path = deploy-rs.lib.${system}.activate.nixos self.nixosConfigurations.${name};
+        }) hosts;
       };
 
       # `nix flake check` runs deploy-rs's own schema checks against ./deploy.
-      checks = deploy-rs.lib.${system}.deployChecks self.deploy;
+      # deployChecks returns a FLAT attrset of derivations, so it must be nested
+      # under the system key (checks.<system>.<name>) to actually run.
+      checks.${system} = deploy-rs.lib.${system}.deployChecks self.deploy;
     };
 }

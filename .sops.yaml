@@ -5,7 +5,7 @@
 #    the prod cluster's staging (age137z0k…) or production (age1heestk…) keys
 #    here, and never encrypt a fleet secret to a cluster key or vice versa.
 #
-# Recipients here are managed by scripts/bootstrap-node (the TUI): it replaces the
+# Recipients here are managed by scripts/fleet (the TUI): it replaces the
 # *_PLACEHOLDER_REPLACE_ME tokens with the real fleet recipient and each node's
 # ssh-to-age recipient as you prepare a node, then re-encrypts (`sops updatekeys`).
 # To do it by hand: uncomment a node's `&node_X` anchor + its `*node_X`
@@ -18,8 +18,8 @@
 # committed — a flake copies only git-tracked files into the store).
 
 keys:
-  # Workstation/operator fleet identity (age-keygen). bootstrap-node fills this
-  # from $HOME/.config/sops/age/garage-fleet.txt.
+  # Workstation/operator fleet identity (age-keygen). scripts/fleet fills this
+  # from private-keys/garage-fleet.txt (fallback $HOME/.config/sops/age/garage-fleet.txt).
   - &fleet_workstation age10hwqc2pzwt8gmm6ve63mnmtfwmenzcm94hy8jksl5e8klpcweuestal7jn
 
   # Per-node recipients = ssh-to-age of each node's Ed25519 SSH host key, seeded
