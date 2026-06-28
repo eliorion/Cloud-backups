@@ -1,0 +1,907 @@
+#!/usr/bin/env bash
+#
+# fleet — one entrypoint for the garage-fleet node lifecycle, run from the
+#         devcontainer (the workstation). Replaces scripts/bootstrap-node +
+#         scripts/deploy-node.
+#
+# Commands:
+#   fleet                       Interactive TUI menu.
+#   fleet new   <node> [opts]   Scaffold + secrets for a node (idempotent).
+#                               Generates the fleet age key, shared secrets, the
+#                               node's SSH host key (-> private-keys/), its
+#                               ssh-to-age recipient (-> .sops.yaml), its
+#                               Tailscale authkey, and — for a brand-new node —
+#                               its hosts/*.nix + disko + flake + .sops.yaml rule.
+#                               Re-running SKIPS what already exists; --force regens.
+#   fleet install <node> <root@host>
+#                               First provision over the network with
+#                               nixos-anywhere. Feeds the ZFS passphrase to the
+#                               installer's RAM (--disk-encryption-keys), seeds the
+#                               host key (--extra-files), then restores
+#                               keylocation=prompt. DESTROYS the target's disks.
+#   fleet deploy  <node> [-- ...]
+#                               Apply a config change to an already-installed node
+#                               with deploy-rs (magic-rollback auto-reverts a bad
+#                               firewall/tailscaled change). First push warns: no
+#                               rollback baseline yet — keep a console reachable.
+#   fleet rollback <node>       Manually roll the node back one generation (ssh).
+#   fleet status  [<node>]      Readiness + lifecycle state per node.
+#   fleet secrets               Edit / verify / git-add the encrypted secrets.
+#   fleet config tailnet <name> Set the MagicDNS tailnet in flake.nix.
+#   fleet guide   <node>        Print the on-box fallback runbook (doc 13).
+#
+# Tool needs:
+#   new / secrets : sops, age, ssh-to-age, openssl, ssh-keygen, git  (NO nix)
+#   install/deploy/rollback : nix (+ ssh)  — these build/activate the flake
+# Secrets are never echoed. private-keys/ + node-*-extra/ are gitignored and
+# never staged. Only ENCRYPTED secrets/*.sops.yaml are committed.
+set -euo pipefail
+
+# ----------------------------------------------------------------------------- paths
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SECRETS="$ROOT/secrets"
+SOPS_YAML="$ROOT/.sops.yaml"
+COMMON="$SECRETS/common.sops.yaml"
+HOSTS="$ROOT/hosts"
+FLAKE="$ROOT/flake.nix"
+PRIVKEYS="$ROOT/private-keys"
+STATE_DIR="$ROOT/.fleet"
+
+# Must match flake.nix `installKeyfile` (the tmpfs path nixos-anywhere uploads
+# the ZFS passphrase to, that the *-install disko variants read).
+INSTALL_KEYFILE_REMOTE="/tmp/fleet-zfs.key"
+
+# Fleet age private key (decrypts sops as the workstation). In-repo copy first
+# (private-keys/, gitignored), then the XDG location, then env override.
+FLEET_AGE_KEY_FILE="${FLEET_AGE_KEY_FILE:-$PRIVKEYS/garage-fleet.txt}"
+[[ -f "$FLEET_AGE_KEY_FILE" ]] || FLEET_AGE_KEY_FILE="$HOME/.config/sops/age/garage-fleet.txt"
+export SOPS_AGE_KEY_FILE="$FLEET_AGE_KEY_FILE"
+
+FORCE=0
+
+# ----------------------------------------------------------------------------- ui
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  B=$'\e[1m'; R=$'\e[0m'; G=$'\e[32m'; Y=$'\e[33m'; RED=$'\e[31m'; C=$'\e[36m'
+else
+  B=''; R=''; G=''; Y=''; RED=''; C=''
+fi
+ok()   { printf '%s✔%s %s\n' "$G" "$R" "$*"; }
+warn() { printf '%s⚠%s %s\n' "$Y" "$R" "$*"; }
+err()  { printf '%s✘%s %s\n' "$RED" "$R" "$*" >&2; }
+note() { printf '%s•%s %s\n' "$C" "$R" "$*"; }
+hdr()  { printf '\n%s== %s ==%s\n' "$B" "$*" "$R"; }
+ask()  { local p="$1" d="${2:-}" a; read -rp "$p${d:+ [$d]}: " a; printf '%s' "${a:-$d}"; }
+confirm() { local a; read -rp "$1 [y/N]: " a; [[ "$a" =~ ^[Yy]$ ]]; }
+pause() { read -rsp "Press Enter to continue…" _; echo; }
+die()  { err "$*"; exit 1; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+need() { have "$1" || die "required tool not found: $1"; }
+
+# ssh-to-age: PATH binary, else mise install, else nix, else fail with a hint.
+ssh_to_age() {
+  if have ssh-to-age; then ssh-to-age "$@"; return; fi
+  local m
+  m="$(ls -1 "$HOME"/.local/share/mise/installs/github-mic92-ssh-to-age/*/ssh-to-age* 2>/dev/null | head -1 || true)"
+  if [[ -n "$m" && -x "$m" ]]; then "$m" "$@"; return; fi
+  if have nix; then nix run nixpkgs#ssh-to-age -- "$@"; return; fi
+  die "ssh-to-age not found. Install: mise use -g github:Mic92/ssh-to-age (or: nix shell nixpkgs#ssh-to-age)"
+}
+
+require_nix() {
+  have nix && return 0
+  err "nix is required for '$1' but is not on PATH."
+  note "This (devcontainer) is fine for 'new'/'secrets'/'status'. Run '$1' from a host with nix."
+  note "Install nix here if you must: sh <(curl -L https://install.determinate.systems/nix) (then reopen the shell)"
+  exit 1
+}
+
+# ----------------------------------------------------------------------------- node model
+# node arg -> canonical "node-x". Accepts "a", "node-a".
+canon() {
+  local n="${1#node-}"; n="$(printf '%s' "$n" | tr '[:upper:]' '[:lower:]')"
+  [[ "$n" =~ ^[a-z]([a-z0-9-]*[a-z0-9])?$ ]] || die "bad node name: $1 (use a letter like 'a' or 'node-a')"
+  printf 'node-%s' "$n"
+}
+suffix() { printf '%s' "${1#node-}"; }          # node-a -> a
+upsfx()  { suffix "$1" | tr '[:lower:]' '[:upper:]'; }
+
+# Type by letter for the canonical fleet; else from --type / existing host file.
+TYPE_OVERRIDE=""
+type_of() {
+  local node="$1" s; s="$(suffix "$node")"
+  if [[ -n "$TYPE_OVERRIDE" ]]; then printf '%s' "$TYPE_OVERRIDE"; return; fi
+  case "$s" in
+    a) printf A;; b) printf B;; c) printf C;; d) printf D;;
+    *)
+      # Infer from an existing scaffolded host file, else require --type.
+      local hf="$HOSTS/$node.nix"
+      if [[ -f "$hf" ]]; then
+        if grep -q 'workstation.nix' "$hf"; then printf A
+        elif grep -q 'role = "gateway"' "$hf"; then printf D
+        elif grep -q 'proxyNode = true' "$hf"; then printf B
+        else printf B; fi
+      else
+        die "cannot infer type for $node — pass --type A|B|C|D"
+      fi;;
+  esac
+}
+is_storage() { [[ "$(type_of "$1")" != D ]]; }   # A/B/C are storage (encrypted)
+type_desc() {
+  case "$1" in
+    A) printf 'workstation + storage (onsite)';;
+    B) printf 'storage + proxy (offsite)';;
+    C) printf 'storage + proxy (offsite)';;
+    D) printf 'gateway (proxy only, no data)';;
+  esac
+}
+
+encrypted() { [[ -f "$1" ]] && grep -q '^sops:' "$1"; }
+recipient_set() { ! grep -q 'age1FLEET_PLACEHOLDER_REPLACE_ME' "$SOPS_YAML"; }
+# uncommented *node_<s> reference INSIDE the common creation_rule (not just the
+# per-node tailscale rule) — proves the node is a recipient of common.sops.yaml.
+node_in_common_rule() {
+  awk -v s="$1" '
+    /^[[:space:]]*-[[:space:]]*path_regex:/ { inc = ($0 ~ /common/) ? 1 : 0 }
+    inc && $0 ~ ("^[[:space:]]*-[[:space:]]*\\*node_" s "([^a-z0-9]|$)") { found=1 }
+    END { exit found?0:1 }
+  ' "$SOPS_YAML"
+}
+# Fully ready = keys anchor filled AND referenced in the common rule, so an
+# interrupted half-run is correctly seen as NOT ready and re-run/self-heals.
+node_recipient_ready() {
+  local s; s="$(suffix "$1")"
+  grep -qE "^[[:space:]]*-[[:space:]]*&node_${s}[[:space:]]+age1" "$SOPS_YAML" && node_in_common_rule "$s"
+}
+host_key_path() { printf '%s/%s-ssh_host_ed25519_key' "$PRIVKEYS" "$1"; }
+committed() { git -C "$ROOT" ls-files --error-unmatch "$1" >/dev/null 2>&1; }
+tailnet_set() { ! grep -q 'tailnet = "<tailnet>";' "$FLAKE"; }
+# node is wired into flake.nix `hosts` (commented/in-prod-additive nodes are not).
+flake_has_node() { grep -qE "^[[:space:]]*${1}[[:space:]]*=[[:space:]]*\./hosts/${1}\.nix;" "$FLAKE"; }
+
+# ============================================================================= new
+ensure_fleet_key() {
+  local wired; wired="$(grep -oP '&fleet_workstation \Kage1[0-9a-z]+' "$SOPS_YAML" | head -1 || true)"
+  if [[ -f "$FLEET_AGE_KEY_FILE" ]]; then
+    ok "fleet age key present ($FLEET_AGE_KEY_FILE)"
+  elif [[ -n "$wired" ]]; then
+    # A real recipient is already committed but we hold no private key. Generating
+    # a new one would orphan every committed secret — refuse and demand the real one.
+    die "fleet age key missing ($FLEET_AGE_KEY_FILE) but .sops.yaml already targets $wired.
+   Restore that private key (break-glass copy) to $FLEET_AGE_KEY_FILE — do NOT generate a
+   new one, or every committed secret becomes undecryptable. (Intentional rotation: keep the
+   OLD key present and re-key the secrets with 'fleet secrets' -> re-encrypt.)"
+  else
+    mkdir -p "$(dirname "$FLEET_AGE_KEY_FILE")"
+    ( umask 077; age-keygen -o "$FLEET_AGE_KEY_FILE" >/dev/null 2>&1 )
+    ok "generated fleet age key ($FLEET_AGE_KEY_FILE)"
+    warn "BREAK-GLASS: copy this private key OFFLINE to two locations — losing it"
+    warn "             makes every committed secret undecryptable from the workstation."
+  fi
+  local recip; recip="$(age-keygen -y "$FLEET_AGE_KEY_FILE")"
+  if [[ -n "$wired" ]]; then
+    [[ "$wired" == "$recip" ]] || die "local fleet key recipient ($recip) != .sops.yaml ($wired) — wrong/old key in $FLEET_AGE_KEY_FILE."
+    ok "fleet recipient matches .sops.yaml"
+  else
+    sed -i "s|age1FLEET_PLACEHOLDER_REPLACE_ME|${recip}|" "$SOPS_YAML"
+    ok "wrote fleet recipient into .sops.yaml"
+  fi
+}
+
+ensure_common_secrets() {
+  if encrypted "$COMMON" && [[ "$FORCE" != 1 ]]; then
+    ok "shared secrets present (secrets/common.sops.yaml)"
+    return
+  fi
+  if encrypted "$COMMON"; then
+    confirm "common.sops.yaml exists — ROTATE rpc/admin/metrics tokens?" || { ok "kept existing shared secrets"; return; }
+  fi
+  trap 'rm -f "$COMMON"' INT TERM   # scrub plaintext if interrupted before encrypt
+  ( umask 077
+    {
+      printf 'rpc_secret: "%s"\n'   "$(openssl rand -hex 32)"
+      printf 'admin_token: "%s"\n'  "$(openssl rand -hex 32)"
+      printf 'metrics_token: "%s"\n' "$(openssl rand -hex 32)"
+    } > "$COMMON"
+  )
+  sops --config "$SOPS_YAML" -e -i "$COMMON"
+  trap - INT TERM
+  encrypted "$COMMON" || die "encryption of common.sops.yaml failed"
+  ok "generated + encrypted shared secrets (rpc/admin/metrics)"
+  note "ZFS passphrase is NOT stored here — typed at format + each unlock (prompt-unlock)."
+}
+
+ensure_host_key() {
+  local node="$1" hk; hk="$(host_key_path "$node")"
+  if [[ -f "$hk" && "$FORCE" != 1 ]]; then
+    ok "host key present ($hk)"
+  else
+    if [[ -f "$hk" && "$FORCE" == 1 ]]; then
+      warn "REGENERATING $node host key — its age identity changes; recipient + updatekeys must follow."
+      confirm "really regenerate $node host key?" || { ok "kept existing host key"; return; }
+    fi
+    mkdir -p "$PRIVKEYS"; chmod 700 "$PRIVKEYS"
+    rm -f "$hk" "$hk.pub"
+    ssh-keygen -t ed25519 -N "" -C "$node" -f "$hk" >/dev/null
+    chmod 600 "$hk"; chmod 644 "$hk.pub"
+    ok "generated host key ($hk)"
+  fi
+}
+
+# .sops.yaml: ensure the node's age recipient anchor + BOTH references exist
+# (keys anchor, common-rule ref, per-node tailscale rule). Idempotent and self-
+# healing: a half-applied prior run is completed on the next call.
+sops_ensure_recipient() {
+  local s="$1" recip="$2" up; up="$(printf '%s' "$s" | tr '[:lower:]' '[:upper:]')"
+  # --- keys-block anchor ---
+  if grep -q "age1NODE${up}_PLACEHOLDER_REPLACE_ME" "$SOPS_YAML"; then
+    sed -i "s|#- &node_${s} age1NODE${up}_PLACEHOLDER_REPLACE_ME|- \&node_${s} ${recip}|" "$SOPS_YAML"
+    ok "filled .sops.yaml anchor for node_${s}"
+  elif grep -qE "^[[:space:]]*-[[:space:]]*&node_${s}[[:space:]]+age1" "$SOPS_YAML"; then
+    if [[ "$FORCE" == 1 ]]; then
+      sed -i -E "s|^([[:space:]]*-[[:space:]]*&node_${s}[[:space:]]+)age1[0-9a-z]+|\1${recip}|" "$SOPS_YAML"
+      ok "updated .sops.yaml anchor for node_${s} (--force)"
+    fi
+  else
+    sops_insert_anchor "$s" "$recip"
+    ok "inserted .sops.yaml anchor for node_${s}"
+  fi
+  # --- common-rule + tailscale refs (ALWAYS; self-heals an interrupted run) ---
+  sed -i "s|#- \*node_${s}|- *node_${s}|g" "$SOPS_YAML"   # uncomment any commented refs
+  node_in_common_rule "$s" || sops_insert_common_ref "$s"
+  sops_ensure_ts_rule "$s"
+}
+
+# Append a keys-block anchor after the last existing node anchor (node-e+ path).
+sops_insert_anchor() {
+  local s="$1" recip="$2" tmp; tmp="$(mktemp)"
+  awk -v line="  - &node_${s} ${recip}" '
+    /(^|[[:space:]])(#?- )&node_/ { last=NR }
+    { rows[NR]=$0 }
+    END { for (i=1;i<=NR;i++){ print rows[i]; if (i==last) print line } }
+  ' "$SOPS_YAML" > "$tmp" && mv "$tmp" "$SOPS_YAML"
+}
+
+# Insert *node_<s> into the common creation_rule's age list (after its last ref).
+sops_insert_common_ref() {
+  local s="$1" tmp; tmp="$(mktemp)"
+  awk -v ref="          - *node_${s}" '
+    /^[[:space:]]*-[[:space:]]*path_regex:/ { incommon = ($0 ~ /common/) ? 1 : 0 }
+    { rows[NR]=$0; if (incommon && $0 ~ /[*](fleet_workstation|node_)/) last=NR }
+    END { for (i=1;i<=NR;i++){ print rows[i]; if (i==last) print ref } }
+  ' "$SOPS_YAML" > "$tmp" && mv "$tmp" "$SOPS_YAML"
+}
+
+# Ensure a per-node tailscale creation_rule exists (append if absent).
+sops_ensure_ts_rule() {
+  local s="$1"
+  grep -qE "path_regex: secrets/node-${s}-tailscale" "$SOPS_YAML" && return 0
+  cat >> "$SOPS_YAML" <<EOF
+  - path_regex: secrets/node-${s}-tailscale\\.sops\\.ya?ml\$
+    key_groups:
+      - age:
+          - *fleet_workstation
+          - *node_${s}
+EOF
+}
+
+ensure_recipient() {
+  local node="$1" s; s="$(suffix "$node")"
+  if node_recipient_ready "$node" && [[ "$FORCE" != 1 ]]; then
+    ok ".sops.yaml recipient for $node ready"; return
+  fi
+  local recip; recip="$(ssh_to_age -i "$(host_key_path "$node").pub")"
+  [[ "$recip" == age1* ]] || die "ssh-to-age did not return an age recipient for $node"
+  sops_ensure_recipient "$s" "$recip"
+}
+
+ensure_authkey() {
+  local node="$1"; local tsfile="$SECRETS/$node-tailscale.sops.yaml"
+  if encrypted "$tsfile" && [[ "$FORCE" != 1 ]]; then
+    ok "Tailscale authkey present ($tsfile)"; return
+  fi
+  if encrypted "$tsfile"; then
+    confirm "$node authkey exists — REPLACE it?" || { ok "kept existing authkey"; return; }
+  fi
+  note "Mint a REUSABLE, NON-EPHEMERAL, tag:garage auth key in the Tailscale admin console."
+  local key; read -rsp "Paste $node auth key (tskey-…, hidden, blank to skip): " key; echo
+  if [[ -z "$key" ]]; then warn "skipped authkey for $node (do 'fleet new $node' again when you have it)"; return; fi
+  [[ "$key" == tskey-* ]] || warn "that does not look like a tskey-… key — storing anyway"
+  trap 'rm -f "$tsfile"' INT TERM   # scrub plaintext if interrupted before encrypt
+  ( umask 077; printf 'authkey: "%s"\n' "$key" > "$tsfile" )
+  sops --config "$SOPS_YAML" -e -i "$tsfile"
+  trap - INT TERM
+  encrypted "$tsfile" || die "encryption of $tsfile failed"
+  ok "stored + encrypted $node authkey"
+}
+
+# Scaffold hosts/<node>.nix + disko + hardware placeholder + flake `hosts` entry
+# for a brand-new node. Skips anything that already exists. Canonical a-d are
+# already in-tree, so this is a no-op for them.
+scaffold_nix() {
+  local node="$1" type; type="$(type_of "$node")"
+  local hf="$HOSTS/$node.nix" df="$HOSTS/disko-$node.nix" hw="$HOSTS/$node-hardware.nix"
+  local hostid; hostid="$(openssl rand -hex 4)"
+
+  if [[ -f "$hf" ]]; then ok "host config exists ($hf)"; else
+    local zone tsip; tsip="100.64.0.x"
+    case "$type" in A) zone=onsite;; B) zone=offsite-1;; C) zone=offsite-2;; D) zone="";; esac
+    [[ "$type" != D ]] && zone="$(ask "zone label for $node" "$zone")"
+    case "$type" in
+      A) host_template_A ;; B|C) host_template_BC ;; D) host_template_D ;;
+    esac | sed -e "s/@NODE@/$node/g" -e "s/@HOSTID@/$hostid/g" -e "s/@ZONE@/$zone/g" -e "s/@TSIP@/$tsip/g" > "$hf"
+    ok "scaffolded $hf (TODO: device paths, capacities, tailscaleIp)"
+  fi
+
+  if [[ -f "$df" ]]; then ok "disko config exists ($df)"; else
+    case "$type" in A) disko_template_A ;; B|C) disko_template_BC ;; D) disko_template_D ;; esac \
+      | sed -e "s/@NODE@/$node/g" > "$df"
+    ok "scaffolded $df (TODO: confirm device paths with lsblk on the box)"
+  fi
+
+  if [[ -f "$hw" ]]; then ok "hardware config exists ($hw)"; else
+    hardware_template | sed -e "s/@NODE@/$node/g" > "$hw"
+    ok "scaffolded $hw (PLACEHOLDER — fill via nixos-anywhere --generate-hardware-config)"
+  fi
+
+  if grep -qE "^[[:space:]]*#?[[:space:]]*${node}[[:space:]]*=[[:space:]]*\./hosts/${node}\.nix;" "$FLAKE"; then
+    ok "flake hosts entry exists for $node"
+  else
+    local tmp; tmp="$(mktemp)"
+    awk -v line="        $node = ./hosts/$node.nix;" '
+      /= \.\/hosts\/node-[a-z0-9-]+\.nix;/ { last=NR }
+      { rows[NR]=$0 }
+      END { for (i=1;i<=NR;i++){ print rows[i]; if (i==last) print line } }
+    ' "$FLAKE" > "$tmp" && mv "$tmp" "$FLAKE"
+    ok "added $node to flake.nix hosts (derives nixosConfigurations + deploy)"
+  fi
+}
+
+cmd_new() {
+  [[ $# -ge 1 ]] || die "usage: fleet new <node> [--type A|B|C|D] [--force]"
+  local node; node="$(canon "$1")"; shift
+  while [[ $# -gt 0 ]]; do case "$1" in
+    --type) TYPE_OVERRIDE="${2^^}"; shift 2;;
+    --force) FORCE=1; shift;;
+    *) die "unknown option: $1";;
+  esac; done
+  for t in sops age age-keygen openssl ssh-keygen git; do need "$t"; done
+  [[ -f "$SOPS_YAML" ]] || die "run from the repo (.sops.yaml not found)"
+  local type; type="$(type_of "$node")"
+  hdr "new $node — type $type ($(type_desc "$type"))"
+  ensure_fleet_key
+  ensure_common_secrets
+  scaffold_nix "$node"
+  ensure_host_key "$node"
+  ensure_recipient "$node"
+  ensure_authkey "$node"
+  hdr "re-encrypt to the current recipient set"
+  sops --config "$SOPS_YAML" updatekeys -y "$COMMON" >/dev/null && ok "updatekeys common.sops.yaml"
+  local tsfile="$SECRETS/$node-tailscale.sops.yaml"
+  [[ -f "$tsfile" ]] && { sops --config "$SOPS_YAML" updatekeys -y "$tsfile" >/dev/null && ok "updatekeys $node tailscale"; }
+  sops -d "$COMMON" >/dev/null 2>&1 && ok "workstation decrypt check OK" || warn "decrypt check failed (is the fleet age key present?)"
+  hdr "next"
+  note "Review the scaffolded hosts/$node.nix + disko (device paths, capacity, hostId)."
+  note "Commit the ENCRYPTED secrets:   fleet secrets   (verify + git add), then git commit."
+  note "Provision it:                   fleet install $node root@<installer-ip>"
+}
+
+# ============================================================================= install
+cmd_install() {
+  [[ $# -ge 2 ]] || die "usage: fleet install <node> <root@host> [-- <extra nixos-anywhere args>]"
+  local node target; node="$(canon "$1")"; target="$2"; shift 2
+  local extra=(); [[ "${1:-}" == -- ]] && { shift; extra=("$@"); }
+  require_nix install
+  need ssh
+  [[ "$target" == *@* ]] || die "target must be user@host (e.g. root@192.0.2.10)"
+  local hk; hk="$(host_key_path "$node")"
+  [[ -f "$hk" ]] || die "no host key for $node — run: fleet new $node"
+  encrypted "$COMMON" || die "secrets/common.sops.yaml is not encrypted — run: fleet new $node"
+  node_recipient_ready "$node" || die "$node recipient missing in .sops.yaml — run: fleet new $node"
+  committed "secrets/common.sops.yaml" || die "commit the encrypted secrets first (fleet secrets). A flake copies only git-tracked files."
+  committed "hosts/$node.nix" || warn "hosts/$node.nix is not committed — the flake build will not see uncommitted files."
+  flake_has_node "$node" || die "$node is not wired into flake.nix (its hosts entry is missing/commented). For an in-production additive node (e.g. node-d), wire its hardware-config and uncomment it in hosts/$node.nix + flake.nix hosts first."
+
+  local type; type="$(type_of "$node")"
+  hdr "install $node ($type) -> $target   [DESTROYS the target's disks]"
+  warn "disko create-mode WIPES all disks listed in hosts/disko-$node.nix."
+  note "Confirm device paths there match 'lsblk' on the installer BEFORE proceeding."
+  confirm "wipe + install $node on $target?" || { note "aborted."; return; }
+
+  # Prompt the passphrase BEFORE creating any temp file, so a typo aborts cleanly.
+  local flake_attr=".#${node}-install" p1=""
+  if is_storage "$node"; then
+    local p2
+    note "The ZFS passphrase is uploaded to the installer's RAM only (tmpfs $INSTALL_KEYFILE_REMOTE),"
+    note "then keylocation is restored to prompt — never written to any disk, here or on the box."
+    read -rsp "ZFS passphrase for $node (hidden): " p1; echo
+    read -rsp "confirm passphrase: " p2; echo
+    [[ -n "$p1" && "$p1" == "$p2" ]] || die "passphrases empty or mismatched"
+  else
+    flake_attr=".#${node}"   # gateway has no encrypted pool; no install variant needed
+  fi
+
+  # Throwaway trees: --extra-files (host key) + the passphrase keyfile. A process
+  # substitution would be dead by the time nixos-anywhere reads it, so the
+  # passphrase goes to a mode-600 temp FILE (NOT under $xf — that tree is copied
+  # onto the target). Both are cleaned on RETURN; we capture nixos-anywhere's exit
+  # status so a failure RETURNS (firing the trap) instead of aborting under set -e
+  # and leaking the private host key.
+  local xf kf_src=""
+  xf="$(mktemp -d)"
+  trap 'rm -rf "$xf" ${kf_src:+"$kf_src"}' RETURN
+  install -d -m700 "$xf/etc/ssh"
+  install -m600 "$hk"     "$xf/etc/ssh/ssh_host_ed25519_key"
+  install -m644 "$hk.pub" "$xf/etc/ssh/ssh_host_ed25519_key.pub"
+  local dek=()
+  if is_storage "$node"; then
+    kf_src="$(mktemp)"; chmod 600 "$kf_src"; printf '%s' "$p1" > "$kf_src"
+    dek=(--disk-encryption-keys "$INSTALL_KEYFILE_REMOTE" "$kf_src")
+  fi
+
+  hdr "nixos-anywhere"
+  local rc=0
+  set +e
+  ( cd "$ROOT" && nix run github:nix-community/nixos-anywhere -- \
+      --flake "$flake_attr" "${dek[@]}" --extra-files "$xf" "${extra[@]}" "$target" )
+  rc=$?
+  set -e
+  [[ $rc -eq 0 ]] || { err "nixos-anywhere failed (rc=$rc) — nothing finalized."; return 1; }
+  mkdir -p "$STATE_DIR"; : > "$STATE_DIR/installed-$node"
+  ok "nixos-anywhere finished — $node rebooted into the installed system."
+
+  if is_storage "$node"; then
+    hdr "post-boot: restore prompt-unlock + bring Garage up"
+    note "The install keyfile is gone (tmpfs). Switch the encrypted datasets back to"
+    note "prompt-unlock and unlock them now (you'll re-type the SAME passphrase)."
+    if confirm "run the finalize over ssh -t $target now?"; then
+      finalize_storage "$target"
+    else
+      print_finalize "$target" "$node"
+    fi
+  fi
+
+  hdr "next"
+  note "Note $node's tailnet IP ('tailscale status' on the box), set fleet.tailscaleIp,"
+  note "set the tailnet ('fleet config tailnet <name>'), commit, then: fleet deploy $node"
+  note "Apply the Garage layout ONCE (prev+1) — see: fleet guide $node"
+}
+
+# Switch any file://-keyed datasets back to prompt and unlock them. The unlock
+# loop is passed as the ssh COMMAND ARGUMENT (not on stdin) so the operator's
+# terminal stays free for `zfs load-key`'s interactive passphrase prompt — a
+# stdin heredoc would starve it. The passphrase is typed into the box; nothing is
+# stored here. Host-key checking is relaxed because this is the box we just
+# provisioned seconds ago (brand-new host key, on the LAN).
+finalize_storage() {
+  local target="$1" remote
+  remote='set -e
+for ds in $(zfs get -H -o name,value -t filesystem keylocation | awk '\''$2 ~ /^file:/{print $1}'\''); do
+  echo ">> $ds: load-key (type the SAME passphrase) then set keylocation=prompt"
+  zfs load-key -L prompt "$ds"
+  zfs set keylocation=prompt "$ds"
+done
+zfs mount -a
+systemctl start garage || true
+systemctl --no-pager --full status garage | head -5 || true'
+  ssh -t -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "$target" "$remote"
+  ok "finalize done — encrypted datasets are prompt-unlock again."
+}
+
+print_finalize() {
+  local target="$1" node="$2"
+  cat <<EOF
+  Run on $node (over the mesh), typing the SAME passphrase when asked:
+
+    ssh -t $target
+    for ds in \$(zfs get -H -o name,value -t filesystem keylocation | awk '\$2 ~ /^file:/{print \$1}'); do
+      zfs load-key -L prompt "\$ds" && zfs set keylocation=prompt "\$ds"
+    done
+    zfs mount -a && systemctl start garage
+EOF
+}
+
+# ============================================================================= deploy
+cmd_deploy() {
+  [[ $# -ge 1 ]] || die "usage: fleet deploy <node> [-- <extra deploy-rs args>]"
+  local node; node="$(canon "$1")"; shift
+  local extra=(); [[ "${1:-}" == -- ]] && { shift; extra=("$@"); }
+  require_nix deploy
+  flake_has_node "$node" || die "$node is not wired into flake.nix (hosts entry missing/commented) — wire it before deploying."
+  committed "hosts/$node.nix" || warn "hosts/$node.nix not committed — deploy-rs builds from git-tracked files only."
+  tailnet_set || die "tailnet still '<tailnet>' in flake.nix — set it: fleet config tailnet <name>"
+
+  hdr "deploy $node (deploy-rs, magic-rollback)"
+  if [[ ! -f "$STATE_DIR/deployed-$node" ]]; then
+    warn "FIRST deploy-rs push to $node — there is no rollback baseline yet, so a bad"
+    warn "firewall/tailscaled change will NOT auto-revert. Keep a console / the box reachable."
+    confirm "proceed with the first (no-rollback-baseline) push?" || { note "aborted."; return; }
+  else
+    note "magic-rollback active: a change that breaks reachability auto-reverts in ~30s."
+  fi
+  ( cd "$ROOT" && nix run github:serokell/deploy-rs -- ".#${node}" "${extra[@]}" )
+  mkdir -p "$STATE_DIR"; : > "$STATE_DIR/deployed-$node"
+  ok "deployed $node (rollback baseline now recorded for next time)."
+}
+
+cmd_rollback() {
+  [[ $# -ge 1 ]] || die "usage: fleet rollback <node>"
+  local node; node="$(canon "$1")"; need ssh
+  tailnet_set || die "set the tailnet first: fleet config tailnet <name>"
+  local host; host="$(deploy_host "$node")"
+  hdr "rollback $node -> previous generation"
+  warn "This switches $node to its previous NixOS generation over ssh."
+  confirm "roll $node ($host) back one generation?" || { note "aborted."; return; }
+  ssh -t "root@$host" "nixos-rebuild switch --rollback"
+  ok "rolled back $node."
+}
+
+deploy_host() {
+  local node="$1" tn
+  tn="$(grep -oP 'tailnet = "\K[^"]+' "$FLAKE" | head -1)"
+  printf '%s.%s.ts.net' "$node" "$tn"
+}
+
+# ============================================================================= config
+cmd_config() {
+  [[ "${1:-}" == tailnet && -n "${2:-}" ]] || die "usage: fleet config tailnet <name>"
+  local name="$2"
+  sed -i "s|tailnet = \"<tailnet>\";|tailnet = \"${name}\";|" "$FLAKE"
+  if tailnet_set; then ok "tailnet set to '$name' in flake.nix"; else
+    sed -i -E "s|tailnet = \"[^\"]*\";|tailnet = \"${name}\";|" "$FLAKE"; ok "tailnet updated to '$name'"; fi
+}
+
+# ============================================================================= secrets
+cmd_secrets() {
+  need sops
+  while :; do
+    hdr "secrets"
+    shopt -s nullglob; local files=("$SECRETS"/*.sops.yaml); shopt -u nullglob
+    local i=1
+    for f in "${files[@]}"; do
+      if encrypted "$f"; then printf '  %2d) %s  %s✔enc%s\n' "$i" "$(basename "$f")" "$G" "$R"
+      else printf '  %2d) %s  %sPLAINTEXT%s\n' "$i" "$(basename "$f")" "$RED" "$R"; fi
+      i=$((i+1))
+    done
+    printf '\n  e <n>  edit (sops)   v  verify + git add   r  re-encrypt all   q  back\n'
+    local choice; choice="$(ask 'choice')"
+    case "$choice" in
+      e*) local n="${choice#e }"; n="${n// /}"; [[ "$n" =~ ^[0-9]+$ ]] && sops "${files[$((n-1))]}" || warn "give an index, e.g. 'e 1'";;
+      v)  local bad; bad="$(grep -L '^sops:' "$SECRETS"/*.sops.yaml 2>/dev/null || true)"
+          if [[ -n "$bad" ]]; then err "PLAINTEXT files — NOT staging:"; printf '   %s\n' $bad
+          else git -C "$ROOT" add .sops.yaml "$SECRETS"/*.sops.yaml flake.nix hosts/ 2>/dev/null
+               ok "staged .sops.yaml + encrypted secrets + flake/hosts"; git -C "$ROOT" status --short | sed 's/^/   /'
+               note "now: git commit -m 'fleet: add/update node secrets'"; fi;;
+      r)  for f in "${files[@]}"; do sops --config "$SOPS_YAML" updatekeys -y "$f" >/dev/null && ok "updatekeys $(basename "$f")"; done;;
+      q|"") return;;
+      *) warn "unknown choice";;
+    esac
+    pause
+  done
+}
+
+# ============================================================================= status
+cmd_status() {
+  local nodes=()
+  if [[ $# -ge 1 ]]; then nodes=("$(canon "$1")"); else
+    shopt -s nullglob; for f in "$HOSTS"/node-*.nix; do
+      [[ "$(basename "$f")" == disko-* || "$(basename "$f")" == *-hardware.nix ]] && continue
+      nodes+=("$(basename "${f%.nix}")"); done; shopt -u nullglob
+  fi
+  hdr "fleet status"
+  printf '  fleet age key : %s\n' "$([[ -f "$FLEET_AGE_KEY_FILE" ]] && echo "✔ $FLEET_AGE_KEY_FILE" || echo "✘ missing")"
+  printf '  .sops fleet   : %s\n' "$(recipient_set && echo ✔ || echo '✘ placeholder')"
+  printf '  common secret : %s\n' "$(encrypted "$COMMON" && echo ✔enc || echo ✘)"
+  printf '  tailnet       : %s\n' "$(tailnet_set && echo "✔ $(grep -oP 'tailnet = "\K[^"]+' "$FLAKE" | head -1)" || echo '✘ <tailnet>')"
+  printf '\n  %-8s %-26s %-7s %-7s %-7s %-7s %-6s %-6s\n' node type key recip authkey commit inst depl
+  for node in "${nodes[@]}"; do
+    local type ts; type="$(type_of "$node" 2>/dev/null || echo '?')"; ts="$SECRETS/$node-tailscale.sops.yaml"
+    printf '  %-8s %-26s %-7s %-7s %-7s %-7s %-6s %-6s\n' \
+      "$node" "$(type_desc "$type" 2>/dev/null || echo '?')" \
+      "$([[ -f "$(host_key_path "$node")" ]] && echo ✔ || echo ✘)" \
+      "$(node_recipient_ready "$node" && echo ✔ || echo ✘)" \
+      "$(encrypted "$ts" && echo ✔ || echo ✘)" \
+      "$(committed "hosts/$node.nix" && echo ✔ || echo ✘)" \
+      "$([[ -f "$STATE_DIR/installed-$node" ]] && echo ✔ || echo -)" \
+      "$([[ -f "$STATE_DIR/deployed-$node" ]] && echo ✔ || echo -)"
+  done
+}
+
+# ============================================================================= guide
+cmd_guide() {
+  local node; node="$(canon "${1:-node-a}")"; local type; type="$(type_of "$node" 2>/dev/null || echo '?')"
+  hdr "on-box fallback runbook — $node (full: documentations/13-node-a-b-install.md)"
+  cat <<EOF
+  Preferred path is remote:   fleet install $node root@<installer-ip>
+  Console/USB fallback (no network install):
+    1. Write the NixOS 25.05 minimal ISO to USB; boot $node; 'sudo -i'.
+    2. lsblk  — confirm disks vs hosts/disko-$node.nix; copy the repo to /root/garage-fleet.
+       cp the host key to /root and: install -d -m700 /mnt/etc/ssh (after disko).
+    3. nix run github:nix-community/disko -- --mode destroy,format,mount --flake .#$node --yes-wipe-all-disks
+       (type the ZFS passphrase at the prompt — keylocation=prompt by default)
+    4. seed key: cp .../ssh_host_ed25519_key{,.pub} /mnt/etc/ssh/ ; chmod 600/644
+       nixos-install --flake .#$node --no-root-passwd ; reboot
+    5. first boot: tailscale status -> set fleet.tailscaleIp ; nixos-rebuild switch --flake .#$node
+       sudo zfs load-key -a && sudo zfs mount -a && sudo systemctl start garage
+  Garage layout (ONCE, version = prev+1):
+    ID=\$(sudo garage node id -q | cut -d@ -f1)
+    sudo garage layout assign "\$ID" -z <zone> -c <bytes> && sudo garage layout apply --version <prev+1>
+EOF
+}
+
+# ============================================================================= templates
+host_template_A() { cat <<'EOF'
+# hosts/@NODE@.nix — TYPE A: onsite storage + devcontainer workstation. Scaffolded
+# by scripts/fleet. NVMe wpool = UNENCRYPTED dev pool; HDD dpool = encrypted,
+# prompt-unlock, all of Garage (the moat).
+{ ... }:
+{
+  imports = [
+    ./disko-@NODE@.nix
+    ./@NODE@-hardware.nix
+    ../modules/zfs-sanoid.nix
+    ../modules/workstation.nix
+  ];
+
+  networking.hostName = "@NODE@";
+  networking.hostId = "@HOSTID@"; # unique 8-hex (auto-generated)
+
+  boot.zfs.extraPools = [ "wpool" "dpool" ];
+  boot.zfs.requestEncryptionCredentials = false;
+
+  fleet = {
+    role = "storage";
+    zone = "@ZONE@";
+    proxyNode = false;
+    zfsAutoUnlock = false;
+    tailscaleIp = "@TSIP@"; # TODO operator: set after first tailscale join
+    dataDirs = [ { path = "/srv/garage/data-hdd"; capacity = "900G"; } ]; # TODO capacity
+    sanoidDatasets = [ "dpool/garage" ];
+  };
+
+  sops.secrets."tailscale-authkey".sopsFile = ../secrets/@NODE@-tailscale.sops.yaml;
+}
+EOF
+}
+host_template_BC() { cat <<'EOF'
+# hosts/@NODE@.nix — TYPE B/C: offsite storage + Tailscale proxy. Scaffolded by
+# scripts/fleet. NVMe npool + HDD dpool, both encrypted prompt-unlock.
+{ ... }:
+{
+  imports = [
+    ./disko-@NODE@.nix
+    ./@NODE@-hardware.nix
+    ../modules/zfs-sanoid.nix
+  ];
+
+  networking.hostName = "@NODE@";
+  networking.hostId = "@HOSTID@"; # unique 8-hex (auto-generated)
+
+  boot.zfs.extraPools = [ "npool" "dpool" ];
+  boot.zfs.requestEncryptionCredentials = false;
+
+  fleet = {
+    role = "storage";
+    zone = "@ZONE@";
+    proxyNode = true;
+    zfsAutoUnlock = false;
+    tailscaleIp = "@TSIP@"; # TODO operator: set after first tailscale join
+    advertiseRoutes = [ ]; # TODO operator: scraper-egress subnet(s), approve in ACL
+    dataDirs = [
+      { path = "/srv/garage/data-ssd"; capacity = "400G"; } # TODO capacity
+      { path = "/srv/garage/data-hdd"; capacity = "900G"; } # TODO capacity
+    ];
+    sanoidDatasets = [ "npool/garage" "dpool/garage" ];
+  };
+
+  sops.secrets."tailscale-authkey".sopsFile = ../secrets/@NODE@-tailscale.sops.yaml;
+}
+EOF
+}
+host_template_D() { cat <<'EOF'
+# hosts/@NODE@.nix — TYPE D: gateway (Tailscale proxy only, capacity 0, no data
+# pool, no moat). Scaffolded by scripts/fleet.
+{ ... }:
+{
+  imports = [
+    ./disko-@NODE@.nix
+    ./@NODE@-hardware.nix
+  ];
+
+  networking.hostName = "@NODE@";
+  networking.hostId = "@HOSTID@"; # unique 8-hex (auto-generated)
+
+  fleet = {
+    role = "gateway";
+    zone = null; # gateway has NO zone
+    proxyNode = false;
+    tailscaleIp = "@TSIP@"; # TODO operator: set after first tailscale join
+  };
+
+  sops.secrets."tailscale-authkey".sopsFile = ../secrets/@NODE@-tailscale.sops.yaml;
+}
+EOF
+}
+disko_template_A() { cat <<'EOF'
+# hosts/disko-@NODE@.nix — TYPE A. NVMe: ESP + ext4 root + UNENCRYPTED wpool
+# (dev/podman home). HDD: encrypted dpool = all Garage. Scaffolded by scripts/fleet.
+# ⚠️ DESTROYS both disks. Confirm device paths with `lsblk` on the box first.
+{ config, ... }:
+let
+  garageKeylocation =
+    if config.fleet.zfsInstallKeyfile != null then "file://${config.fleet.zfsInstallKeyfile}" else "prompt";
+in
+{
+  disko.devices = {
+    disk = {
+      nvme = {
+        type = "disk";
+        device = "/dev/nvme0n1"; # TODO operator: confirm with `lsblk`
+        content = {
+          type = "gpt";
+          partitions = {
+            ESP = { type = "EF00"; size = "512M"; content = { type = "filesystem"; format = "vfat"; mountpoint = "/boot"; mountOptions = [ "umask=0077" ]; }; };
+            root = { size = "60G"; content = { type = "filesystem"; format = "ext4"; mountpoint = "/"; }; };
+            zfs = { size = "100%"; content = { type = "zfs"; pool = "wpool"; }; };
+          };
+        };
+      };
+      hdd = { type = "disk"; device = "/dev/sda"; content = { type = "zfs"; pool = "dpool"; }; }; # TODO device
+    };
+    zpool = {
+      wpool = {
+        type = "zpool"; mode = "";
+        rootFsOptions = { compression = "zstd"; "com.sun:auto-snapshot" = "false"; acltype = "posixacl"; xattr = "sa"; };
+        options.ashift = "12";
+        datasets."dev" = { type = "zfs_fs"; mountpoint = "/home/dev"; };
+      };
+      dpool = {
+        type = "zpool"; mode = "";
+        rootFsOptions = { compression = "zstd"; "com.sun:auto-snapshot" = "false"; acltype = "posixacl"; xattr = "sa"; };
+        options.ashift = "12";
+        datasets = {
+          "garage" = { type = "zfs_fs"; options = { encryption = "aes-256-gcm"; keyformat = "passphrase"; keylocation = garageKeylocation; mountpoint = "none"; }; };
+          "garage/meta" = { type = "zfs_fs"; mountpoint = "/srv/garage/meta"; options.recordsize = "16K"; };
+          "garage/data" = { type = "zfs_fs"; mountpoint = "/srv/garage/data-hdd"; options.recordsize = "1M"; };
+        };
+      };
+    };
+  };
+}
+EOF
+}
+disko_template_BC() { cat <<'EOF'
+# hosts/disko-@NODE@.nix — TYPE B/C. NVMe: ESP + ext4 root + encrypted npool
+# (meta + ssd data). HDD: encrypted dpool (bulk data). Scaffolded by scripts/fleet.
+# ⚠️ DESTROYS both disks. Confirm device paths with `lsblk` on the box first.
+{ config, ... }:
+let
+  garageKeylocation =
+    if config.fleet.zfsInstallKeyfile != null then "file://${config.fleet.zfsInstallKeyfile}" else "prompt";
+in
+{
+  disko.devices = {
+    disk = {
+      nvme = {
+        type = "disk";
+        device = "/dev/nvme0n1"; # TODO operator: confirm with `lsblk`
+        content = {
+          type = "gpt";
+          partitions = {
+            ESP = { type = "EF00"; size = "512M"; content = { type = "filesystem"; format = "vfat"; mountpoint = "/boot"; mountOptions = [ "umask=0077" ]; }; };
+            root = { size = "60G"; content = { type = "filesystem"; format = "ext4"; mountpoint = "/"; }; };
+            zfs = { size = "100%"; content = { type = "zfs"; pool = "npool"; }; };
+          };
+        };
+      };
+      hdd = { type = "disk"; device = "/dev/sda"; content = { type = "zfs"; pool = "dpool"; }; }; # TODO device
+    };
+    zpool = {
+      npool = {
+        type = "zpool"; mode = "";
+        rootFsOptions = { compression = "zstd"; "com.sun:auto-snapshot" = "false"; acltype = "posixacl"; xattr = "sa"; };
+        options.ashift = "12";
+        datasets = {
+          "garage" = { type = "zfs_fs"; options = { encryption = "aes-256-gcm"; keyformat = "passphrase"; keylocation = garageKeylocation; mountpoint = "none"; }; };
+          "garage/meta" = { type = "zfs_fs"; mountpoint = "/srv/garage/meta"; options.recordsize = "16K"; };
+          "garage/data" = { type = "zfs_fs"; mountpoint = "/srv/garage/data-ssd"; options.recordsize = "1M"; };
+        };
+      };
+      dpool = {
+        type = "zpool"; mode = "";
+        rootFsOptions = { compression = "zstd"; "com.sun:auto-snapshot" = "false"; acltype = "posixacl"; xattr = "sa"; };
+        options.ashift = "12";
+        datasets = {
+          "garage" = { type = "zfs_fs"; options = { encryption = "aes-256-gcm"; keyformat = "passphrase"; keylocation = garageKeylocation; mountpoint = "none"; }; };
+          "garage/data" = { type = "zfs_fs"; mountpoint = "/srv/garage/data-hdd"; options.recordsize = "1M"; };
+        };
+      };
+    };
+  };
+}
+EOF
+}
+disko_template_D() { cat <<'EOF'
+# hosts/disko-@NODE@.nix — TYPE D gateway: boot + root only, UNENCRYPTED (no data
+# pool, no moat). Scaffolded by scripts/fleet. ⚠️ DESTROYS the disk.
+# NOTE: an EXISTING production gateway must be reconfigured ADDITIVELY — do NOT
+# import this disko in place (CLAUDE.md / doc 10 Phase 3).
+{ ... }:
+{
+  disko.devices.disk.main = {
+    type = "disk";
+    device = "/dev/nvme0n1"; # TODO operator: confirm with `lsblk`
+    content = {
+      type = "gpt";
+      partitions = {
+        ESP = { type = "EF00"; size = "512M"; content = { type = "filesystem"; format = "vfat"; mountpoint = "/boot"; mountOptions = [ "umask=0077" ]; }; };
+        root = { size = "100%"; content = { type = "filesystem"; format = "ext4"; mountpoint = "/"; }; };
+      };
+    };
+  };
+}
+EOF
+}
+hardware_template() { cat <<'EOF'
+# hosts/@NODE@-hardware.nix — PLACEHOLDER scaffolded by scripts/fleet.
+# Replace with the REAL hardware-config before/at install, e.g.:
+#   fleet install @NODE@ root@<ip> -- --generate-hardware-config nixos-generate-config hosts/@NODE@-hardware.nix
+# (nixos-anywhere writes the real disk controller / kernel modules back here),
+# or paste `nixos-generate-config --show-hardware-config` from the booted box.
+{ ... }:
+{
+  # TODO operator: real boot.initrd.availableKernelModules / cpu microcode go here.
+  # disko provides fileSystems; base.nix provides the bootloader defaults.
+}
+EOF
+}
+
+# ============================================================================= menu
+cmd_menu() {
+  while :; do
+    cmd_status || true
+    cat <<EOF
+
+  ${B}fleet${R} — node lifecycle
+    1) new <node>      scaffold + secrets
+    2) install <node>  provision (nixos-anywhere)
+    3) deploy <node>   apply config (deploy-rs + rollback)
+    4) rollback <node> previous generation
+    5) secrets         edit / verify / commit
+    6) config tailnet  set MagicDNS tailnet
+    7) guide <node>    on-box fallback runbook
+    q) quit
+EOF
+    local c; c="$(ask 'choice')"
+    case "$c" in
+      1) cmd_new   "$(ask 'node (a/b/c/d or node-x)')" ${TY:+--type "$TY"} || true; pause;;
+      2) local n t; n="$(ask 'node')"; t="$(ask 'target (root@host)')"; cmd_install "$n" "$t" || true; pause;;
+      3) cmd_deploy   "$(ask 'node')" || true; pause;;
+      4) cmd_rollback "$(ask 'node')" || true; pause;;
+      5) cmd_secrets || true;;
+      6) cmd_config tailnet "$(ask 'tailnet name')" || true; pause;;
+      7) cmd_guide "$(ask 'node')" || true; pause;;
+      q|Q|"") echo "bye."; return 0;;
+      *) warn "unknown choice"; pause;;
+    esac
+  done
+}
+
+# ============================================================================= dispatch
+main() {
+  [[ -f "$SOPS_YAML" ]] || die "run from inside the garage-fleet repo (.sops.yaml not found at $ROOT)"
+  case "${1:-}" in
+    new)      shift; cmd_new "$@";;
+    install)  shift; cmd_install "$@";;
+    deploy)   shift; cmd_deploy "$@";;
+    rollback) shift; cmd_rollback "$@";;
+    status)   shift; cmd_status "$@";;
+    secrets)  shift; cmd_secrets "$@";;
+    config)   shift; cmd_config "$@";;
+    guide)    shift; cmd_guide "$@";;
+    ""|menu)  cmd_menu;;
+    -h|--help|help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//';;
+    *) die "unknown command: $1 (try: fleet --help)";;
+  esac
+}
+main "$@"

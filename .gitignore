@@ -34,3 +34,6 @@ flake.lock
 node-*-extra/
 result
 result-*
+
+# scripts/fleet local lifecycle state (deploy/install markers) — not shared.
+.fleet/

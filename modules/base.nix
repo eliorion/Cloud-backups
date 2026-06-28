@@ -48,6 +48,21 @@
       default = false;
       description = "true = auto-unlock data pool from a sops passphrase at boot; false = prompt-unlock post-boot (offsite default).";
     };
+
+    # INSTALL-ONLY. null at runtime → encrypted ZFS datasets use keylocation
+    # "prompt" (the moat). The flake's `<node>-install` variant sets this to a
+    # tmpfs path; nixos-anywhere uploads the passphrase there via
+    # --disk-encryption-keys so disko can format the encrypted pools
+    # non-interactively on a remote installer (no TTY for a prompt). scripts/fleet
+    # restores keylocation=prompt right after first boot (`zfs set keylocation`),
+    # so the seed file never persists and the passphrase is never stored on the
+    # box. Harmless on unencrypted nodes (no encrypted dataset references it).
+    zfsInstallKeyfile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "/tmp/fleet-zfs.key";
+      description = "Install-only tmpfs path the ZFS passphrase is uploaded to (nixos-anywhere --disk-encryption-keys); null at runtime = keylocation=prompt.";
+    };
   };
 
   config = {
