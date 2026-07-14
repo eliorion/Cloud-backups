@@ -57,19 +57,24 @@ imports no disko and no `zfs-sanoid`.
 
 ---
 
-## ⚠️ `nix flake lock` — operator must run it
+## `flake.lock` — committed, and must stay that way
 
-**No `flake.lock` is committed** and **nix is not available** in the environment
-this repo was generated in. Before anything else, on a workstation with nix
-(flakes enabled):
+`flake.lock` **is committed**, and pins every input (nixpkgs, disko, sops-nix,
+deploy-rs, nixos-anywhere) by rev. The devcontainer ships nix (flakes enabled),
+so it and `nix develop` work out of the box:
 
 ```bash
 cd garage-fleet
-nix flake lock      # resolves nixpkgs/disko/sops-nix/deploy-rs to flake.lock
+nix develop         # operator toolchain (sops/age/ssh-to-age/deploy-rs/nixos-anywhere)
 nix flake check     # evaluates configs + runs deploy-rs schema checks
+nix flake update    # bump every input; `nix flake lock` only fills gaps
 ```
 
-Commit the resulting `flake.lock`. Renovate then keeps the inputs current.
+Commit the lock whenever it changes. Renovate keeps the inputs current.
+
+⚠️ **Never gitignore `flake.lock`.** A flake's source is its git-tracked files,
+so an ignored lock is invisible to nix — it re-resolves every input to upstream
+HEAD on each command and silently pins nothing.
 
 ---
 
@@ -143,7 +148,7 @@ SSH host key (`--extra-files`), runs nixos-anywhere against the `.#node-a-instal
 variant, then restores `keylocation=prompt` post-boot over `ssh`. In effect:
 
 ```bash
-nix run github:nix-community/nixos-anywhere -- \
+nix run .#nixos-anywhere -- \
   --flake .#node-a-install \
   --disk-encryption-keys /tmp/fleet-zfs.key <passphrase-tmpfile> \
   --extra-files <hostkey-tree> \   # seeds /etc/ssh/ssh_host_ed25519_key
@@ -168,7 +173,7 @@ Phase 3): do **not** import `disko-gateway.nix` in place, add only
 ## 2. Deploy (deploy-rs, magic rollback) — doc 09 ADR-4
 
 ```bash
-./scripts/fleet deploy node-a    # runs: nix run github:serokell/deploy-rs -- .#node-a
+./scripts/fleet deploy node-a    # runs: nix run .#deploy-rs -- .#node-a
 ./scripts/fleet rollback node-a  # escape hatch: switch the box to its previous generation
 ```
 

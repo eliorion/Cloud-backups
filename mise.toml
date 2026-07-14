@@ -24,12 +24,12 @@ description = "Pre-generate node-B's SSH host key + print its age recipient (doc
 run = """
 install -d -m700 node-b-extra/etc/ssh
 ssh-keygen -t ed25519 -N '' -C node-b -f node-b-extra/etc/ssh/ssh_host_ed25519_key
-nix run nixpkgs#ssh-to-age -- -i node-b-extra/etc/ssh/ssh_host_ed25519_key.pub
+nix run .#ssh-to-age -- -i node-b-extra/etc/ssh/ssh_host_ed25519_key.pub
 """
 
 [tasks.deploy]
 description = "Deploy node-B over the tailnet; node-B builds its OWN x86_64 closure"
-run = "nix run github:serokell/deploy-rs -- .#node-b --remote-build"
+run = "nix run .#deploy-rs -- .#node-b --remote-build"
 
 [tasks.lint]
 description = "shellcheck the repo scripts"

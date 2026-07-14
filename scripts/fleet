@@ -84,8 +84,10 @@ ssh_to_age() {
   local m
   m="$(ls -1 "$HOME"/.local/share/mise/installs/github-mic92-ssh-to-age/*/ssh-to-age* 2>/dev/null | head -1 || true)"
   if [[ -n "$m" && -x "$m" ]]; then "$m" "$@"; return; fi
-  if have nix; then nix run nixpkgs#ssh-to-age -- "$@"; return; fi
-  die "ssh-to-age not found. Install: mise use -g github:Mic92/ssh-to-age (or: nix shell nixpkgs#ssh-to-age)"
+  # "$ROOT#..." (not nixpkgs#, not .#) — nixpkgs# resolves via the flake REGISTRY
+  # (unstable), and this runs from any cwd, so the flake ref must be absolute.
+  if have nix; then nix run "$ROOT#ssh-to-age" -- "$@"; return; fi
+  die "ssh-to-age not found. Install: mise use -g github:Mic92/ssh-to-age (or: nix develop)"
 }
 
 require_nix() {
@@ -442,7 +444,9 @@ cmd_install() {
   hdr "nixos-anywhere"
   local rc=0
   set +e
-  ( cd "$ROOT" && nix run github:nix-community/nixos-anywhere -- \
+  # .#nixos-anywhere (not the bare github: ref) so flake.lock pins the rev — the
+  # tool that formats the disks must not float between installs.
+  ( cd "$ROOT" && nix run ".#nixos-anywhere" -- \
       --flake "$flake_attr" "${dek[@]}" --extra-files "$xf" "${extra[@]}" "$target" )
   rc=$?
   set -e
@@ -519,7 +523,8 @@ cmd_deploy() {
   else
     note "magic-rollback active: a change that breaks reachability auto-reverts in ~30s."
   fi
-  ( cd "$ROOT" && nix run github:serokell/deploy-rs -- ".#${node}" "${extra[@]}" )
+  # .#deploy-rs (not the bare github: ref) so flake.lock pins the rev.
+  ( cd "$ROOT" && nix run ".#deploy-rs" -- ".#${node}" "${extra[@]}" )
   mkdir -p "$STATE_DIR"; : > "$STATE_DIR/deployed-$node"
   ok "deployed $node (rollback baseline now recorded for next time)."
 }
@@ -617,7 +622,7 @@ cmd_guide() {
     1. Write the NixOS 25.05 minimal ISO to USB; boot $node; 'sudo -i'.
     2. lsblk  — confirm disks vs hosts/disko-$node.nix; copy the repo to /root/garage-fleet.
        cp the host key to /root and: install -d -m700 /mnt/etc/ssh (after disko).
-    3. nix run github:nix-community/disko -- --mode destroy,format,mount --flake .#$node --yes-wipe-all-disks
+    3. nix run .#disko -- --mode destroy,format,mount --flake .#$node --yes-wipe-all-disks
        (type the ZFS passphrase at the prompt — keylocation=prompt by default)
     4. seed key: cp .../ssh_host_ed25519_key{,.pub} /mnt/etc/ssh/ ; chmod 600/644
        nixos-install --flake .#$node --no-root-passwd ; reboot

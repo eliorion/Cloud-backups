@@ -37,10 +37,14 @@ in
   config = {
     services.garage = {
       enable = true;
-      # ⚠️ Pin Garage v2.3.0 (doc 10 Addressing / Phase 8). Renovate-tracked via
-      #    the nixpkgs flake input; package attr name may differ by channel
-      #    (garage_2 / garage_2_x). TODO operator: confirm the attr resolves on
-      #    your pinned nixpkgs and adjust if needed.
+      # ⚠️ Design target is v2.3.0 (doc 10 Addressing / Phase 8), but nixpkgs
+      #    nixos-25.05 ships NO garage_2_3_0 attr — the newest is garage_2_1_0, so
+      #    this resolves to 2.1.0 and 2.1.0 is what deploys. Verify with:
+      #      nix eval --raw .#nixosConfigurations.node-a.config.services.garage.package.version
+      #    To actually get 2.3.0, bump the nixpkgs input to a channel carrying it or
+      #    add an overlay — see documentations/13-node-a-b-install.md. Renovate
+      #    tracks the nixpkgs input. Both versions lack Object Lock / S3 versioning,
+      #    so the ZFS moat argument is unaffected either way.
       package = pkgs.garage_2;
       settings = {
         metadata_dir = metaDir;
@@ -109,6 +113,18 @@ in
     # gateway has no encrypted pool, so this condition is storage-only.
     systemd.services.garage.unitConfig = lib.mkIf (!isGateway) {
       ConditionPathIsMountPoint = [ metaDir ] ++ dataPaths;
+    };
+
+    # Upstream's garage unit sets NO Restart=, so any crash — notably an OOM kill on
+    # node-B's 4 GB box — leaves Garage down until a human notices, on nodes that are
+    # offsite by design. Restart it.
+    #
+    # Safe against the ConditionPathIsMountPoint above: a failed condition makes
+    # systemd SKIP the unit (not fail it), so a still-locked pool cannot drive a
+    # restart loop. RestartSec covers a pool that mounts moments later.
+    systemd.services.garage.serviceConfig = {
+      Restart = "on-failure";
+      RestartSec = "10s";
     };
 
     # The Garage S3 region NixOS option is set above; the LAYOUT (zone /

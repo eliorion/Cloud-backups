@@ -289,7 +289,7 @@ SSH-as-root reachable from the workstation.
 - [ ] **Provision** from the workstation:
       ```bash
       # seed the ZFS key + ssh host key so sops-nix can decrypt from first boot
-      nix run github:nix-community/nixos-anywhere -- \
+      nix run .#nixos-anywhere -- \
         --flake .#node-a \
         --disk-encryption-keys /tmp/zfs.key ./local-zfs.key \
         --extra-files ./node-a-extra \        # /etc/ssh/ssh_host_ed25519_key

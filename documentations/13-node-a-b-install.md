@@ -120,7 +120,9 @@ From the repo root (this repo *is* `garage-fleet`):
 ```bash
 mise install                       # sops, age, jq, gh, shellcheck (mise.toml)
 nix --version                      # flakes-enabled nix (2.x)
-# ssh-to-age is NOT in mise — use `nix run nixpkgs#ssh-to-age -- …` (below)
+# ssh-to-age: from mise (mise.toml) or `nix run .#ssh-to-age -- …` (below).
+# NOT `nixpkgs#ssh-to-age` — that resolves via the flake registry (unstable),
+# bypassing flake.lock. `scripts/fleet` picks whichever is present.
 ```
 
 Security invariants (from doc 09/12, do not break):
@@ -202,7 +204,7 @@ is gitignored (never commit a host private key).
 for n in node-a node-b; do
   install -d -m700 $n-extra/etc/ssh
   ssh-keygen -t ed25519 -N "" -C $n -f $n-extra/etc/ssh/ssh_host_ed25519_key
-  echo "== $n recipient =="; nix run nixpkgs#ssh-to-age -- -i $n-extra/etc/ssh/ssh_host_ed25519_key.pub
+  echo "== $n recipient =="; nix run .#ssh-to-age -- -i $n-extra/etc/ssh/ssh_host_ed25519_key.pub
 done
 ```
 
@@ -267,7 +269,7 @@ is unrecoverable from a lost node fleet (doc 09 §8).
 ## 0.8 Lock + sanity-check the flake
 
 ```bash
-nix flake lock                     # writes flake.lock (gitignored — fine)
+nix flake lock                     # no-op if flake.lock is already committed (it is)
 nix flake check                    # deploy-rs schema + eval (needs §0.2 + §0.3 done)
 nix eval --raw .#nixosConfigurations.node-a.config.services.garage.package.version   # see the 2.1.0 vs 2.3.0 note
 ```
@@ -331,7 +333,7 @@ cd /root/garage-fleet && { [ -f flake.lock ] || nix flake lock; }
 ### A.3 Partition + format (prompts for the passphrase)
 
 ```bash
-nix run github:nix-community/disko -- \
+nix run .#disko -- \
   --mode destroy,format,mount --flake .#node-a --yes-wipe-all-disks
 ```
 
@@ -517,8 +519,8 @@ sudo garage status                 # BOTH node-A and node-B now listed, HEALTHY
 
 ```bash
 # workstation, per node (or `mise run deploy` for node-b):
-nix run github:serokell/deploy-rs -- .#node-a --remote-build
-nix run github:serokell/deploy-rs -- .#node-b --remote-build
+nix run .#deploy-rs -- .#node-a --remote-build
+nix run .#deploy-rs -- .#node-b --remote-build
 ```
 
 > ⚠️ First post-install deploy-rs push has **no canary baseline**, so magic

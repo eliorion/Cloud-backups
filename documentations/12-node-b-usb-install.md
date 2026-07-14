@@ -445,7 +445,7 @@ Replace the hardcoded `datasets."bpool/garage"` block with:
 ### 1.6 Lock + sanity-check the flake (on the workstation)
 
 ```bash
-nix flake lock                     # writes flake.lock (gitignored, that's fine)
+nix flake lock                     # no-op if flake.lock is already committed (it is)
 nix flake check                    # deploy-rs schema + eval
 nix build .#nixosConfigurations.node-b.config.system.build.toplevel --dry-run
 ```
@@ -541,7 +541,7 @@ cd /root/garage-fleet
 
 ```bash
 cd /root/garage-fleet
-nix run github:nix-community/disko -- \
+nix run .#disko -- \
   --mode destroy,format,mount \
   --flake .#node-b \
   --yes-wipe-all-disks

@@ -26,9 +26,10 @@ local-zfs.key
 #    (e.g. `grep -L 'sops:' secrets/*.sops.yaml` returns nothing, or a pre-commit
 #    sops check) so a still-plaintext file can never slip in.
 
-# flake.lock is intentionally NOT committed here — the operator runs
-# `nix flake lock` (README). Remove this line once you commit a lock file.
-flake.lock
+# flake.lock IS committed — do not add it here. A flake's source is its
+# git-tracked files, so a gitignored lock is invisible to nix: it silently
+# re-resolves every input to upstream HEAD on each command and the pin is a
+# no-op (verified: a bogus rev in an ignored lock evaluates fine).
 
 # nixos-anywhere per-node extra-files staging (contains seeded SSH host keys).
 node-*-extra/
@@ -37,3 +38,6 @@ result-*
 
 # scripts/fleet local lifecycle state (deploy/install markers) — not shared.
 .fleet/
+
+# Project folder
+garage-fleet/
