@@ -57,6 +57,24 @@ in
                 mountpoint = "/";
               };
             };
+            # A PLAIN partition, never a zvol: swap on a ZFS zvol deadlocks under
+            # memory pressure (ZFS must allocate to free the very page being
+            # evicted). 8G backs container builds; ARC is capped at 4 GiB
+            # (modules/workstation.nix), leaving ~12G to dev.
+            #
+            # randomEncryption: this NVMe is UNENCRYPTED by design (see header), but
+            # swap holds evicted RAM — which can include the dpool passphrase typed
+            # at `zfs load-key` and decrypted Garage bytes. A fresh random key per
+            # boot makes swap unreadable offline WITHOUT a passphrase, so the node
+            # still boots unattended for DevPod. Rules out hibernation; headless
+            # node, so `resumeDevice` is deliberately unset.
+            swap = {
+              size = "8G";
+              content = {
+                type = "swap";
+                randomEncryption = true;
+              };
+            };
             zfs = {
               size = "100%";
               content = {

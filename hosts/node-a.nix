@@ -51,7 +51,12 @@
     dataDirs = [
       {
         path = "/srv/garage/data-hdd";
-        capacity = "900G";
+        # 700G of a 931.5 GiB disk. NOT the raw size: this pool also carries
+        # garage/meta AND 90 days of sanoid snapshots (modules/zfs-sanoid.nix) —
+        # the ransomware moat. Advertising the full disk fills the pool, snapshots
+        # then fail to take, and the moat dies silently. Raise once real churn is
+        # visible in `zpool list`; lowering it after the pool wedges is painful.
+        capacity = "700G";
       }
     ];
     # Moat: sanoid snapshots the one Garage pool. wpool/dev is NOT a moat dataset.

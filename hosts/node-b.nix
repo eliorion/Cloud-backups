@@ -21,6 +21,24 @@
   # Do NOT block boot waiting for a passphrase — unlock happens post-boot.
   boot.zfs.requestEncryptionCredentials = false;
 
+  # --- 4 GB RAM budget -------------------------------------------------------
+  # ARC defaults to ~50% of RAM (~2G here) and would crowd Garage out of a 4 GB
+  # box. Cap at 1 GiB — this node is a DR target, so cache hit-rate matters far
+  # less than headroom. (node-A caps ARC in modules/workstation.nix; that module
+  # is node-A-only, so node-B needs its own.)
+  boot.extraModprobeConfig = "options zfs zfs_arc_max=1073741824";
+
+  # Compressed RAM swap instead of a swap partition. Deliberately NO disk swap:
+  # Garage's dominant consumer is the LMDB meta store (db_engine="lmdb"), which is
+  # mmap'd — file-backed, so the kernel evicts it straight back to its own file and
+  # never to swap. Disk swap would only absorb anon spikes that zram already takes,
+  # at the cost of thrashing a node we cannot physically reach. zram is also the
+  # only option that leaks nothing: node-B's root is unencrypted ext4.
+  zramSwap = {
+    enable = true;
+    memoryPercent = 50;
+  };
+
   fleet = {
     role = "storage";
     zone = "offsite-1";

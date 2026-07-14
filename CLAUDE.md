@@ -56,7 +56,7 @@ already in production** — reconfigure it **additively** (do not import
   nixos-anywhere + transient tmpfs ZFS-passphrase feed → restores prompt-unlock),
   `fleet deploy <node>` (deploy-rs), `fleet config tailnet <name>`, `fleet secrets`,
   `fleet status`. `new`/`secrets` need sops+age (no nix); `install`/`deploy` need nix.
-- **deploy-rs, not Flux** (`fleet deploy <node>` wraps it): `nix run github:serokell/deploy-rs -- .#node-a`. Magic
+- **deploy-rs, not Flux** (`fleet deploy <node>` wraps it): `nix run .#deploy-rs -- .#node-a`. Magic
   rollback auto-reverts a bad firewall/tailscaled change in ~30s, but only once a
   *prior* generation was also deploy-rs-deployed — do the first post-install
   deploy with console / initrd-SSH fallback. Per-host SSH identities go in
@@ -69,10 +69,15 @@ already in production** — reconfigure it **additively** (do not import
   `deploy-rs` push** — else activation can't decrypt and `switch` fails.
 - **Garage layout** is imperative: `garage layout assign … -z <zone> -c <bytes>`,
   then `garage layout apply --version <prev+1>` — exactly `prev+1`, once.
-- **Garage `v2.3.0`** is pinned (nixpkgs input + `services.garage.package`),
-  Renovate-tracked. v2.3.0 has **no Object Lock and no S3 versioning** —
-  immutability is the **ZFS snapshot moat** (`modules/zfs-sanoid.nix`), not a
-  Garage feature. The `garage` user must hold **no** `zfs allow` on the data pool.
+- **Garage version**: design target is `v2.3.0` (docs 09/10), but what actually
+  deploys is **`2.1.0`** — nixpkgs `nixos-25.05` has no `garage_2_3_0` attr
+  (newest is `garage_2_1_0`), so `pkgs.garage_2` resolves to 2.1.0. To really get
+  2.3.0, bump the nixpkgs input or add an overlay (doc 13). Renovate tracks the
+  input. Verify, never assume:
+  `nix eval --raw .#nixosConfigurations.node-a.config.services.garage.package.version`
+- **Neither 2.1.0 nor 2.3.0 has Object Lock or S3 versioning** — immutability is
+  the **ZFS snapshot moat** (`modules/zfs-sanoid.nix`), not a Garage feature. The
+  `garage` user must hold **no** `zfs allow` on the data pool.
 - All Garage listeners (`3900` S3 / `3901` RPC / `3903` admin) bind the node's
   `tailscale0` overlay IP only; the host firewall trusts only `tailscale0`.
   Tailscale ACL is deny-by-default: `tag:garage ↔ tag:garage` on `3900,3901,3903`;
@@ -84,15 +89,25 @@ already in production** — reconfigure it **additively** (do not import
   gitignored secret is invisible to sops-nix activation). Verify each is encrypted
   before committing (`grep -L 'sops:' secrets/*.sops.yaml` returns nothing). Never
   commit plaintext secrets or the ZFS/age private keys.
-- **No `flake.lock` is committed** — the operator runs `nix flake lock` on a nix
-  workstation; Renovate tracks inputs afterward.
+- **`flake.lock` MUST be committed** — same rule as `secrets/*.sops.yaml`: a flake's
+  source is its git-tracked files, so a gitignored lock is invisible to nix, which
+  then re-resolves every input to upstream HEAD on each command and pins nothing.
+  Renovate tracks inputs. `nixos-anywhere` is an input too (`nix run .#nixos-anywhere`
+  in `scripts/fleet install`) — the tool that formats disks must not float.
 
 ## Verify changes
 
-`nix` is not available in the repo-generation environment — run these on a
-workstation with nix (flakes enabled):
+The devcontainer ships nix (single-user, no daemon, flakes enabled — see
+`.devcontainer/Dockerfile`), so these run here:
 
 ```bash
+nix develop         # operator toolchain: sops/age/ssh-to-age/openssl/openssh/git
+                    # + deploy-rs, all pinned by flake.lock (flake.nix devShells)
 nix flake lock      # first time only: resolves nixpkgs/disko/sops-nix/deploy-rs
 nix flake check     # evaluates all nixosConfigurations + deploy-rs schema checks
 ```
+
+`fleet install`/`deploy` from the devcontainer reach LAN targets fine, but the
+container has no `tailscale` and no `/dev/net/tun` — offsite nodes on the tailnet
+need userspace tailscaled + an ssh `ProxyCommand`, `--device=/dev/net/tun`
++ `--cap-add=NET_ADMIN` in `devcontainer.json`, or running `fleet` from the host.

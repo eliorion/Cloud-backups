@@ -11,9 +11,9 @@
   # MAGIC ROLLBACK (ADR-4): a bad tailscaled/firewall change on a remote offsite
   # node auto-reverts within ~30s instead of stranding a node you cannot reach.
   #
-  # ⚠️ NO flake.lock is committed and nix is NOT available in this environment.
-  #    The OPERATOR must run `nix flake lock` once on a workstation with nix
-  #    (flakes enabled) before the first `nix flake check` / deploy. See README.
+  # ⚠️ flake.lock IS committed and must stay tracked — a flake's source is its
+  #    git-tracked files, so a gitignored lock is invisible to nix and every input
+  #    silently floats to upstream HEAD. See README.
   description = "Garage backup fleet — standalone NixOS + ZFS (doc 09/10)";
 
   inputs = {
@@ -35,6 +35,14 @@
       url = "github:serokell/deploy-rs";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    # Provisioning tool, NOT part of any host closure — `scripts/fleet install`
+    # runs it as `nix run .#nixos-anywhere`, so flake.lock pins the exact rev
+    # instead of the bare `github:` ref floating on every install.
+    # No `inputs.nixpkgs.follows`: unlike disko/sops-nix/deploy-rs this never
+    # enters a nixosConfiguration, so there is nothing to dedup, and pinning it
+    # to our 25.05 nixpkgs only risks breaking the tool's own build.
+    nixos-anywhere.url = "github:nix-community/nixos-anywhere";
   };
 
   outputs =
@@ -44,11 +52,13 @@
       disko,
       sops-nix,
       deploy-rs,
+      nixos-anywhere,
       ...
     }:
     let
       system = "x86_64-linux";
       lib = nixpkgs.lib;
+      pkgs = nixpkgs.legacyPackages.${system};
 
       # Modules every host shares. Per-host disko + role are added in hosts/*.nix.
       commonModules = [
@@ -124,6 +134,37 @@
           hostname = "${name}.${tailnet}.ts.net";
           profiles.system.path = deploy-rs.lib.${system}.activate.nixos self.nixosConfigurations.${name};
         }) hosts;
+      };
+
+      # Tools `scripts/fleet` shells out to, re-exported so it can call them as
+      # `nix run .#<tool>` — resolved through flake.lock instead of a bare
+      # `github:` ref that floats to upstream HEAD on every invocation. The tools
+      # that format disks and push closures must not move under you.
+      packages.${system} = {
+        nixos-anywhere = nixos-anywhere.packages.${system}.default;
+        deploy-rs = deploy-rs.packages.${system}.default;
+        disko = disko.packages.${system}.disko;
+        # From OUR pinned nixpkgs. `nix run nixpkgs#ssh-to-age` would instead hit
+        # the flake REGISTRY (nixos-unstable), floating independently of this lock.
+        ssh-to-age = pkgs.ssh-to-age;
+      };
+
+      # Operator toolchain for `scripts/fleet`, pinned by flake.lock so every
+      # workstation gets identical versions: `nix develop`. Mirrors the script's
+      # own dependency list (scripts/fleet header): sops/age/ssh-to-age/openssl/
+      # ssh-keygen/git for `new`+`secrets`, deploy-rs + nixos-anywhere for
+      # `deploy`/`install`.
+      devShells.${system}.default = pkgs.mkShell {
+        packages = [
+          pkgs.sops
+          pkgs.age
+          pkgs.ssh-to-age
+          pkgs.openssl
+          pkgs.openssh
+          pkgs.git
+          deploy-rs.packages.${system}.default
+          nixos-anywhere.packages.${system}.default
+        ];
       };
 
       # `nix flake check` runs deploy-rs's own schema checks against ./deploy.
