@@ -60,7 +60,10 @@
       lib = nixpkgs.lib;
       pkgs = nixpkgs.legacyPackages.${system};
 
-      # Modules every host shares. Per-host disko + role are added in hosts/*.nix.
+      # Modules every host shares. Per-host disko + hardware are added in
+      # hosts/*.nix. Modules here self-gate on `fleet.role` (garage.nix branches
+      # storage/gateway; zfs-sanoid.nix is storage-only) rather than being
+      # imported by hand per host.
       commonModules = [
         disko.nixosModules.disko
         sops-nix.nixosModules.sops
@@ -68,6 +71,7 @@
         ./modules/sops.nix
         ./modules/tailscale.nix
         ./modules/garage.nix
+        ./modules/zfs-sanoid.nix
       ];
 
       # THE source of truth for the fleet's nodes. `scripts/fleet` adds ONE line

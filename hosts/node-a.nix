@@ -10,7 +10,6 @@
   imports = [
     ./disko-node-a.nix
     ./node-a-hardware.nix
-    ../modules/zfs-sanoid.nix
     ../modules/workstation.nix
   ];
 

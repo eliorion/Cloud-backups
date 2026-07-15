@@ -6,7 +6,6 @@
   imports = [
     ./disko-node-b.nix
     ./node-b-hardware.nix
-    ../modules/zfs-sanoid.nix
   ];
 
   networking.hostName = "node-b";
