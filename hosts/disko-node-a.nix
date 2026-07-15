@@ -167,14 +167,31 @@ in
               mountpoint = "none"; # container only
             };
           };
+          # ⚠️ noauto+nofail is LOAD-BEARING, do not "tidy" it away.
+          # dpool/garage is keylocation=prompt and node-a.nix sets
+          # requestEncryptionCredentials=false, so these datasets are LOCKED at
+          # boot BY DESIGN and cannot mount. Without noauto/nofail systemd treats
+          # them as required, local-fs.target FAILS, and the node drops to
+          # emergency.target — no sshd, so the "unlock post-boot over the mesh"
+          # the whole design rests on becomes impossible. `zfs mount -a` (fleet's
+          # finalize, or by hand after `zfs load-key`) mounts them post-unlock;
+          # garage.service gates on ConditionPathIsMountPoint until then.
           "garage/meta" = {
             type = "zfs_fs";
             mountpoint = "/srv/garage/meta";
+            mountOptions = [
+              "noauto"
+              "nofail"
+            ];
             options.recordsize = "16K";
           };
           "garage/data" = {
             type = "zfs_fs";
             mountpoint = "/srv/garage/data-hdd";
+            mountOptions = [
+              "noauto"
+              "nofail"
+            ];
             options.recordsize = "1M";
           };
         };
