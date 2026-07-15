@@ -33,8 +33,10 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
 - `modules/` — `base.nix` (ssh/nftables/users/nix), `sops.nix` (sops-nix wiring),
   `garage.nix` (`services.garage` + garage.toml, tailnet listeners),
   `zfs-sanoid.nix` (ZFS + sanoid RO snapshot moat + autoScrub), `tailscale.nix`,
-  `workstation.nix` (node-A ONLY: rootless-podman devcontainer host for DevPod —
-  unprivileged `dev` user, ARC cap; co-located with the DR Garage role)
+  `workstation.nix` (node-A ONLY: ROOT-docker devcontainer host for DevPod — `dev`
+  user in the `docker` group, ARC cap, docker data-root on `wpool/docker`.
+  ⚠️ The docker group is root-equivalent, so node-A's ZFS moat is **deliberately
+  forfeited** — B and C hold the real moat and must never take this role)
 - `hosts/` — `node-a/-b/-c/-d.nix`; `disko-node-a.nix` (A: unencrypted NVMe wpool +
   encrypted HDD dpool), `disko-node-b.nix` (B: encrypted npool + dpool),
   `disko-storage.nix` (C: single encrypted pool), `disko-gateway.nix` (boot+root

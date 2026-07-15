@@ -18,6 +18,14 @@
 #
 # HARD INVARIANT (audit in doc 10 Phase 5 gate): `zfs allow bpool/garage` must
 # show the garage user NOWHERE. Never `zfs allow garage …destroy/rollback`.
+#
+# ⚠️ NODE-A EXCEPTION — the moat above does NOT hold on node-A. It also runs the
+#    workstation role (modules/workstation.nix), whose ROOT docker daemon puts the
+#    `dev` user one `docker run -v /:/host` away from uid 0, and therefore from
+#    `zfs destroy dpool/garage@*`. Deliberate operator trade for the full container
+#    envelope. The "attacker needs OS root on all three nodes at once" argument
+#    therefore reduces to node-B + node-C — which is where the real defence lives,
+#    and why NEITHER may take a workstation role.
 { config, lib, ... }:
 {
   # Which ZFS datasets sanoid snapshots (the moat). Default bpool/garage (the
