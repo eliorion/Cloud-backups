@@ -4,7 +4,6 @@
 {
   imports = [
     ./disko-storage.nix
-    ../modules/zfs-sanoid.nix
     # TODO operator: ./node-c-hardware.nix (generated at install)
   ];
 

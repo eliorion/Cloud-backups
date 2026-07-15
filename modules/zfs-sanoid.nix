@@ -1,6 +1,7 @@
 # modules/zfs-sanoid.nix — the ransomware MOAT (doc 09 §7, doc 10 Phase 5).
-# Imported by STORAGE nodes only (A/B/C). The gateway (node-D) has no data pool
-# and does NOT import this.
+# In commonModules (flake.nix) like every other fleet module; its config is a
+# no-op unless `fleet.role == "storage"`, so the gateway (node-D, no data pool)
+# is excluded automatically rather than by remembering not to import it.
 #
 # WHY THIS IS THE MOAT, not a nicety:
 #   Garage has NO S3 Object Lock and NO object versioning (v2.3.0). So a stolen
@@ -27,7 +28,9 @@
     description = "ZFS datasets sanoid snapshots (the moat).";
   };
 
-  config = {
+  # Storage-only. `options` above stays unconditional (an option must be declared
+  # even where it is unused) — only `config` is gated.
+  config = lib.mkIf (config.fleet.role == "storage") {
     # Native ZFS is enabled; the encrypted pool + datasets are declared in
     # disko-storage.nix. Here we add the snapshot policy + pool hygiene.
     boot.supportedFilesystems = [ "zfs" ];
