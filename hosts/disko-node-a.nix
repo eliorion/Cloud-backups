@@ -167,31 +167,40 @@ in
               mountpoint = "none"; # container only
             };
           };
-          # ⚠️ noauto+nofail is LOAD-BEARING, do not "tidy" it away.
+          # ⚠️ `nofail` is LOAD-BEARING — and it must be nofail ALONE, never
+          #    "noauto" "nofail". Do not "tidy" either fact away.
+          #
           # dpool/garage is keylocation=prompt and node-a.nix sets
           # requestEncryptionCredentials=false, so these datasets are LOCKED at
-          # boot BY DESIGN and cannot mount. Without noauto/nofail systemd treats
-          # them as required, local-fs.target FAILS, and the node drops to
-          # emergency.target — no sshd, so the "unlock post-boot over the mesh"
-          # the whole design rests on becomes impossible. `zfs mount -a` (fleet's
-          # finalize, or by hand after `zfs load-key`) mounts them post-unlock;
-          # garage.service gates on ConditionPathIsMountPoint until then.
+          # boot BY DESIGN and cannot mount. Without nofail systemd treats them as
+          # REQUIRED, local-fs.target FAILS, and the node drops to emergency.target
+          # — no sshd, so the "unlock post-boot over the mesh" this design rests on
+          # becomes impossible.
+          #
+          # Why NOT also noauto: nixpkgs zfs.nix wires zfs-import-<pool>.service
+          #   requiredBy = poolMounts ++ optional (!noauto) "zfs-import.target"
+          # where noauto = ALL of the pool's filesystems carry "noauto". Every
+          # dpool filesystem is a garage dataset, so adding noauto drops dpool out
+          # of zfs-import.target — nothing then pulls the import in, the POOL never
+          # imports, and `zfs load-key dpool/garage` fails "dataset does not exist"
+          # despite boot.zfs.extraPools listing it. (Observed on node-A's first
+          # install.) node-B/-C are worse: every one of their pools is garage-only,
+          # so NO data pool would import at all, offsite.
+          #
+          # nofail alone gives both: the pool imports, the mount is attempted and
+          # fails harmlessly (journal shows it — that IS the pool being locked),
+          # boot completes, sshd comes up. `zfs mount -a` after `zfs load-key`
+          # mounts them; garage.service gates on ConditionPathIsMountPoint.
           "garage/meta" = {
             type = "zfs_fs";
             mountpoint = "/srv/garage/meta";
-            mountOptions = [
-              "noauto"
-              "nofail"
-            ];
+            mountOptions = [ "nofail" ];
             options.recordsize = "16K";
           };
           "garage/data" = {
             type = "zfs_fs";
             mountpoint = "/srv/garage/data-hdd";
-            mountOptions = [
-              "noauto"
-              "nofail"
-            ];
+            mountOptions = [ "nofail" ];
             options.recordsize = "1M";
           };
         };

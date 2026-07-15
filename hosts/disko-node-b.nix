@@ -90,26 +90,21 @@ in
               mountpoint = "none"; # container only
             };
           };
-          # ⚠️ noauto+nofail is LOAD-BEARING — see the long note in
-          # hosts/disko-node-a.nix. Locked-at-boot datasets declared as REQUIRED
-          # mounts fail local-fs.target and strand the node in emergency.target
-          # with no sshd. On an OFFSITE node that means a site visit.
+          # ⚠️ `nofail` ALONE — never add "noauto". See the long note in
+          # hosts/disko-node-a.nix: nofail stops a locked-at-boot dataset from failing
+          # local-fs.target (which strands the node in emergency.target with no sshd —
+          # a site visit, offsite), while adding noauto would drop this pool out of
+          # zfs-import.target so it never imports at all.
           "garage/meta" = {
             type = "zfs_fs";
             mountpoint = "/srv/garage/meta";
-            mountOptions = [
-              "noauto"
-              "nofail"
-            ];
+            mountOptions = [ "nofail" ];
             options.recordsize = "16K";
           };
           "garage/data" = {
             type = "zfs_fs";
             mountpoint = "/srv/garage/data-ssd";
-            mountOptions = [
-              "noauto"
-              "nofail"
-            ];
+            mountOptions = [ "nofail" ];
             options.recordsize = "1M";
           };
         };
@@ -136,14 +131,11 @@ in
               mountpoint = "none";
             };
           };
-          # ⚠️ noauto+nofail load-bearing — see hosts/disko-node-a.nix.
+          # ⚠️ `nofail` ALONE — never add "noauto". See hosts/disko-node-a.nix.
           "garage/data" = {
             type = "zfs_fs";
             mountpoint = "/srv/garage/data-hdd";
-            mountOptions = [
-              "noauto"
-              "nofail"
-            ];
+            mountOptions = [ "nofail" ];
             options.recordsize = "1M";
           };
         };
