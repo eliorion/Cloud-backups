@@ -65,7 +65,6 @@
   };
 
   # Per-node Tailscale auth key file (see modules/sops.nix + secrets/.example).
-  sops.secrets."tailscale-authkey".sopsFile = ../secrets/node-a-tailscale.sops.yaml;
 
   # Garage capacity for this node's layout assignment is applied imperatively:
   #   garage layout assign <id-A> -z onsite -c <bytes>   (doc 13 Phase A)

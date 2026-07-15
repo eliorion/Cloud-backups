@@ -28,7 +28,7 @@
 #   and a plaintext passphrase under world-traversable /tmp is itself a leak. The
 #   documented "persisted via sops-nix" model is NOT satisfied by this line
 #   alone. The operator MUST, before relying on reboot-unlock:
-#     1. put the real passphrase in secrets/common.sops.yaml under `zfs-passphrase`
+#     1. put the real passphrase in secrets/common.enc.yaml under `zfs-passphrase`
 #        (declared as a sops-nix secret in modules/sops.nix, owner root 0400), and
 #     2. either repoint keylocation at the decrypted secret path
 #        (file://${config.sops.secrets."zfs-passphrase".path}) once sops-nix has

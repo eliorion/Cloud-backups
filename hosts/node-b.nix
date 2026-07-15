@@ -69,5 +69,4 @@
     ];
   };
 
-  sops.secrets."tailscale-authkey".sopsFile = ../secrets/node-b-tailscale.sops.yaml;
 }

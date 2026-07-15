@@ -12,18 +12,29 @@ local-zfs.key
 *.key
 
 # Never commit PLAINTEXT secret values (e.g. gen-secrets output notes). The real
-# values live ENCRYPTED in secrets/*.sops.yaml; keep break-glass copies OFFLINE.
+# values live ENCRYPTED in secrets/*.enc.yaml; keep break-glass copies OFFLINE.
 *.real-value
+
+# PLAINTEXT decrypts of the sops files. `sops decrypt secrets/node-a.enc.yaml >
+# secrets/node-a.yaml` produces a file holding rpc_secret / tailscale authkeys /
+# root passwords in the clear, one `git add -A` away from being published. The
+# ONLY secrets/*.yaml that may be committed are the .enc.yaml artifacts, so deny
+# the whole glob and re-allow those explicitly.
+# Prefer `sops edit <file>.enc.yaml` — it decrypts to a tmpfs temp file, opens
+# $EDITOR, re-encrypts on save, and never leaves plaintext in the worktree.
+secrets/*.yaml
+secrets/*.yml
+!secrets/*.enc.yaml
 
 # Real sops files are SOPS-ENCRYPTED, so they MUST be committed — that is the
 # standard sops-nix+flakes pattern and matches how the prod repo handles its
 # *.enc.yaml. They are deliberately NOT gitignored: when building from a flake
 # (nixos-anywhere --flake, deploy-rs, nix flake check), Nix copies ONLY
-# git-tracked files into the store, so a gitignored secrets/*.sops.yaml would be
+# git-tracked files into the store, so a gitignored secrets/*.enc.yaml would be
 # INVISIBLE to the flake source and sops-nix activation would fail to find it.
 #
-# ⚠️ Before committing, verify each secrets/*.sops.yaml is actually encrypted
-#    (e.g. `grep -L 'sops:' secrets/*.sops.yaml` returns nothing, or a pre-commit
+# ⚠️ Before committing, verify each secrets/*.enc.yaml is actually encrypted
+#    (e.g. `grep -L 'sops:' secrets/*.enc.yaml` returns nothing, or a pre-commit
 #    sops check) so a still-plaintext file can never slip in.
 
 # flake.lock IS committed — do not add it here. A flake's source is its

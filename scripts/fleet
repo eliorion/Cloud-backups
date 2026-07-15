@@ -34,14 +34,14 @@
 #   new / secrets : sops, age, ssh-to-age, openssl, ssh-keygen, git  (NO nix)
 #   install/deploy/rollback : nix (+ ssh)  — these build/activate the flake
 # Secrets are never echoed. private-keys/ + node-*-extra/ are gitignored and
-# never staged. Only ENCRYPTED secrets/*.sops.yaml are committed.
+# never staged. Only ENCRYPTED secrets/*.enc.yaml are committed.
 set -euo pipefail
 
 # ----------------------------------------------------------------------------- paths
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SECRETS="$ROOT/secrets"
 SOPS_YAML="$ROOT/.sops.yaml"
-COMMON="$SECRETS/common.sops.yaml"
+COMMON="$SECRETS/common.enc.yaml"
 HOSTS="$ROOT/hosts"
 FLAKE="$ROOT/flake.nix"
 PRIVKEYS="$ROOT/private-keys"
@@ -141,7 +141,7 @@ type_desc() {
 encrypted() { [[ -f "$1" ]] && grep -q '^sops:' "$1"; }
 recipient_set() { ! grep -q 'age1FLEET_PLACEHOLDER_REPLACE_ME' "$SOPS_YAML"; }
 # uncommented *node_<s> reference INSIDE the common creation_rule (not just the
-# per-node tailscale rule) — proves the node is a recipient of common.sops.yaml.
+# per-node rule) — proves the node is a recipient of common.enc.yaml.
 node_in_common_rule() {
   awk -v s="$1" '
     /^[[:space:]]*-[[:space:]]*path_regex:/ { inc = ($0 ~ /common/) ? 1 : 0 }
@@ -192,11 +192,11 @@ ensure_fleet_key() {
 
 ensure_common_secrets() {
   if encrypted "$COMMON" && [[ "$FORCE" != 1 ]]; then
-    ok "shared secrets present (secrets/common.sops.yaml)"
+    ok "shared secrets present (secrets/common.enc.yaml)"
     return
   fi
   if encrypted "$COMMON"; then
-    confirm "common.sops.yaml exists — ROTATE rpc/admin/metrics tokens?" || { ok "kept existing shared secrets"; return; }
+    confirm "common.enc.yaml exists — ROTATE rpc/admin/metrics tokens?" || { ok "kept existing shared secrets"; return; }
   fi
   trap 'rm -f "$COMMON"' INT TERM   # scrub plaintext if interrupted before encrypt
   ( umask 077
@@ -208,7 +208,7 @@ ensure_common_secrets() {
   )
   sops --config "$SOPS_YAML" -e -i "$COMMON"
   trap - INT TERM
-  encrypted "$COMMON" || die "encryption of common.sops.yaml failed"
+  encrypted "$COMMON" || die "encryption of common.enc.yaml failed"
   ok "generated + encrypted shared secrets (rpc/admin/metrics)"
   note "ZFS passphrase is NOT stored here — typed at format + each unlock (prompt-unlock)."
 }
@@ -277,9 +277,9 @@ sops_insert_common_ref() {
 # Ensure a per-node tailscale creation_rule exists (append if absent).
 sops_ensure_ts_rule() {
   local s="$1"
-  grep -qE "path_regex: secrets/node-${s}-tailscale" "$SOPS_YAML" && return 0
+  grep -qE "path_regex: secrets/node-${s}\\.enc" "$SOPS_YAML" && return 0
   cat >> "$SOPS_YAML" <<EOF
-  - path_regex: secrets/node-${s}-tailscale\\.sops\\.ya?ml\$
+  - path_regex: secrets/node-${s}\\.enc\\.ya?ml\$
     key_groups:
       - age:
           - *fleet_workstation
@@ -298,7 +298,7 @@ ensure_recipient() {
 }
 
 ensure_authkey() {
-  local node="$1"; local tsfile="$SECRETS/$node-tailscale.sops.yaml"
+  local node="$1"; local tsfile="$SECRETS/$node.enc.yaml"
   if encrypted "$tsfile" && [[ "$FORCE" != 1 ]]; then
     ok "Tailscale authkey present ($tsfile)"; return
   fi
@@ -378,8 +378,8 @@ cmd_new() {
   ensure_recipient "$node"
   ensure_authkey "$node"
   hdr "re-encrypt to the current recipient set"
-  sops --config "$SOPS_YAML" updatekeys -y "$COMMON" >/dev/null && ok "updatekeys common.sops.yaml"
-  local tsfile="$SECRETS/$node-tailscale.sops.yaml"
+  sops --config "$SOPS_YAML" updatekeys -y "$COMMON" >/dev/null && ok "updatekeys common.enc.yaml"
+  local tsfile="$SECRETS/$node.enc.yaml"
   [[ -f "$tsfile" ]] && { sops --config "$SOPS_YAML" updatekeys -y "$tsfile" >/dev/null && ok "updatekeys $node tailscale"; }
   sops -d "$COMMON" >/dev/null 2>&1 && ok "workstation decrypt check OK" || warn "decrypt check failed (is the fleet age key present?)"
   hdr "next"
@@ -398,9 +398,9 @@ cmd_install() {
   [[ "$target" == *@* ]] || die "target must be user@host (e.g. root@192.0.2.10)"
   local hk; hk="$(host_key_path "$node")"
   [[ -f "$hk" ]] || die "no host key for $node — run: fleet new $node"
-  encrypted "$COMMON" || die "secrets/common.sops.yaml is not encrypted — run: fleet new $node"
+  encrypted "$COMMON" || die "secrets/common.enc.yaml is not encrypted — run: fleet new $node"
   node_recipient_ready "$node" || die "$node recipient missing in .sops.yaml — run: fleet new $node"
-  committed "secrets/common.sops.yaml" || die "commit the encrypted secrets first (fleet secrets). A flake copies only git-tracked files."
+  committed "secrets/common.enc.yaml" || die "commit the encrypted secrets first (fleet secrets). A flake copies only git-tracked files."
   committed "hosts/$node.nix" || warn "hosts/$node.nix is not committed — the flake build will not see uncommitted files."
   flake_has_node "$node" || die "$node is not wired into flake.nix (its hosts entry is missing/commented). For an in-production additive node (e.g. node-d), wire its hardware-config and uncomment it in hosts/$node.nix + flake.nix hosts first."
 
@@ -600,7 +600,7 @@ cmd_status() {
   printf '  tailnet       : %s\n' "$(tailnet_set && echo "✔ $(grep -oP 'tailnet = "\K[^"]+' "$FLAKE" | head -1)" || echo '✘ <tailnet>')"
   printf '\n  %-8s %-26s %-7s %-7s %-7s %-7s %-6s %-6s\n' node type key recip authkey commit inst depl
   for node in "${nodes[@]}"; do
-    local type ts; type="$(type_of "$node" 2>/dev/null || echo '?')"; ts="$SECRETS/$node-tailscale.sops.yaml"
+    local type ts; type="$(type_of "$node" 2>/dev/null || echo '?')"; ts="$SECRETS/$node.enc.yaml"
     printf '  %-8s %-26s %-7s %-7s %-7s %-7s %-6s %-6s\n' \
       "$node" "$(type_desc "$type" 2>/dev/null || echo '?')" \
       "$([[ -f "$(host_key_path "$node")" ]] && echo ✔ || echo ✘)" \
@@ -664,7 +664,6 @@ host_template_A() { cat <<'EOF'
     sanoidDatasets = [ "dpool/garage" ];
   };
 
-  sops.secrets."tailscale-authkey".sopsFile = ../secrets/@NODE@-tailscale.sops.yaml;
 }
 EOF
 }
@@ -699,7 +698,6 @@ host_template_BC() { cat <<'EOF'
     sanoidDatasets = [ "npool/garage" "dpool/garage" ];
   };
 
-  sops.secrets."tailscale-authkey".sopsFile = ../secrets/@NODE@-tailscale.sops.yaml;
 }
 EOF
 }
@@ -723,7 +721,6 @@ host_template_D() { cat <<'EOF'
     tailscaleIp = "@TSIP@"; # TODO operator: set after first tailscale join
   };
 
-  sops.secrets."tailscale-authkey".sopsFile = ../secrets/@NODE@-tailscale.sops.yaml;
 }
 EOF
 }

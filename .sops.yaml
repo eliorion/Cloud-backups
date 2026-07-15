@@ -13,7 +13,7 @@
 #
 # Whole-file encryption (no encrypted_regex): these are flat key/value secret
 # files consumed by sops-nix, not k8s Secret manifests, so EVERY value is
-# encrypted. sops encrypts to AGE recipients; the committed secrets/*.sops.yaml
+# encrypted. sops encrypts to AGE recipients; the committed secrets/*.enc.yaml
 # files ARE the encrypted artifacts you push (CLAUDE.md: real sops files MUST be
 # committed — a flake copies only git-tracked files into the store).
 
@@ -30,9 +30,9 @@ keys:
   #- &node_d age1NODED_PLACEHOLDER_REPLACE_ME
 
 creation_rules:
-  # Shared cluster secrets (rpc_secret, admin/metrics tokens). Encrypt to the
-  # workstation AND every node so any node can decrypt the shared rpc_secret.
-  - path_regex: secrets/common\.sops\.ya?ml$
+  # Shared cluster secrets (rpc_secret, admin/metrics tokens) — identical on every
+  # node. Encrypted to the workstation AND every node so any node can decrypt them.
+  - path_regex: secrets/common\.enc\.ya?ml$
     key_groups:
       - age:
           - *fleet_workstation
@@ -41,25 +41,29 @@ creation_rules:
           #- *node_c
           #- *node_d
 
-  # Per-node Tailscale auth keys — a cluster-join credential (doc 09 §8). One file
-  # PER NODE, encrypted to ONLY its node + the workstation, so a leaked tag:garage
-  # key has minimal blast radius.
-  - path_regex: secrets/node-a-tailscale\.sops\.ya?ml$
+  # PER-NODE secrets: tailscale-authkey (cluster-join credential, doc 09 §8),
+  # root_password_hash (console rescue), zfs-passphrase (only if zfsAutoUnlock).
+  # ONE file per node, encrypted to ONLY that node + the workstation, so a leaked
+  # node key has minimal blast radius and node-B's root password cannot open node-A.
+  # ⚠️ These rules are matched TOP-DOWN, first match wins: `node-a.enc.yaml` must
+  #    stay ABOVE any broader `node-.*` pattern, or a node file would be encrypted
+  #    to the wrong recipients.
+  - path_regex: secrets/node-a\.enc\.ya?ml$
     key_groups:
       - age:
           - *fleet_workstation
           - *node_a
-  - path_regex: secrets/node-b-tailscale\.sops\.ya?ml$
+  - path_regex: secrets/node-b\.enc\.ya?ml$
     key_groups:
       - age:
           - *fleet_workstation
           - *node_b
-  - path_regex: secrets/node-c-tailscale\.sops\.ya?ml$
+  - path_regex: secrets/node-c\.enc\.ya?ml$
     key_groups:
       - age:
           - *fleet_workstation
           #- *node_c
-  - path_regex: secrets/node-d-tailscale\.sops\.ya?ml$
+  - path_regex: secrets/node-d\.enc\.ya?ml$
     key_groups:
       - age:
           - *fleet_workstation

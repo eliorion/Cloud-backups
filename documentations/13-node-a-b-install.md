@@ -42,7 +42,7 @@ or use subcommands:
 
 | Command | Does (automated) | You still do |
 |---|---|---|
-| `new <node>` | fleet age key; `.sops.yaml` recipient; `common.sops.yaml` (rpc/admin/metrics, **no** zfs-passphrase); per-node SSH host key → `private-keys/` → `ssh-to-age` recipient → `.sops.yaml`; node authkey; `sops updatekeys`. For a **brand-new** node also scaffolds `hosts/*.nix` + disko + the `flake.nix` entry. Re-running SKIPS what exists | mint the `tag:garage` auth key + set the Tailscale ACL; copy the fleet age key to break-glass; fill the scaffolded `hostId` / device paths / capacities |
+| `new <node>` | fleet age key; `.sops.yaml` recipient; `common.enc.yaml` (rpc/admin/metrics, **no** zfs-passphrase); per-node SSH host key → `private-keys/` → `ssh-to-age` recipient → `.sops.yaml`; node authkey; `sops updatekeys`. For a **brand-new** node also scaffolds `hosts/*.nix` + disko + the `flake.nix` entry. Re-running SKIPS what exists | mint the `tag:garage` auth key + set the Tailscale ACL; copy the fleet age key to break-glass; fill the scaffolded `hostId` / device paths / capacities |
 | `install <node> root@host` | REMOTE `nixos-anywhere`: feeds the ZFS passphrase to the installer's RAM (`--disk-encryption-keys`), seeds the host key (`--extra-files`), installs `.#<node>-install`, then restores `keylocation=prompt` over ssh | confirm `lsblk` device paths; type the passphrase; apply the Garage layout once (`fleet guide`) |
 | `deploy <node>` | `deploy-rs` push with **magic-rollback** (auto-reverts a change that breaks reachability). First push warns: no rollback baseline yet | keep a console reachable for that **first** push |
 | `secrets` | list / `sops` edit / **verify-all-encrypted + git-stage** / `updatekeys` | `git commit && git push` the encrypted files |
@@ -92,8 +92,8 @@ the docs finally agree. Already committed/staged for you:
    `authorizedKeys.keys` lists **empty**. NixOS refuses to build a box with no
    login (`Neither the root account nor any wheel user has a password or SSH
    authorized key`). Paste your key(s) in §0.2.
-2. **Real secrets** — only `secrets/*.sops.yaml.example` exist. You must create
-   the real encrypted `secrets/common.sops.yaml` + per-node tailscale files
+2. **Real secrets** — only `secrets/*.enc.yaml.example` exist. You must create
+   the real encrypted `secrets/common.enc.yaml` + per-node tailscale files
    (§0.3–0.4).
 
 **⚠️ Garage version pin is NOT satisfied by the current channel.** On the pinned
@@ -172,15 +172,15 @@ export SOPS_AGE_KEY_FILE="$HOME/.config/sops/age/garage-fleet.txt"
 Paste the printed `age1…` **recipient** into `.sops.yaml`, replacing the
 `age1FLEET…` placeholder.
 
-> **Prompt-unlock ⇒ do NOT put `zfs-passphrase` in `common.sops.yaml`.**
+> **Prompt-unlock ⇒ do NOT put `zfs-passphrase` in `common.enc.yaml`.**
 > `modules/sops.nix` only declares that secret when `fleet.zfsAutoUnlock = true`,
 > and both node-A and node-B set it `false`. Including it would be dead, and the
 > passphrase must never live on the box.
 
 ```bash
-cp secrets/common.sops.yaml.example secrets/common.sops.yaml
-$EDITOR secrets/common.sops.yaml      # paste rpc_secret/admin_token/metrics_token; DELETE the zfs-passphrase line
-sops -e -i secrets/common.sops.yaml
+cp secrets/common.enc.yaml.example secrets/common.enc.yaml
+$EDITOR secrets/common.enc.yaml      # paste rpc_secret/admin_token/metrics_token; DELETE the zfs-passphrase line
+sops -e -i secrets/common.enc.yaml
 ```
 
 Per-node Tailscale auth keys (mint each in the admin console: **reusable,
@@ -188,9 +188,9 @@ non-ephemeral, `tag:garage`, long/no expiry**):
 
 ```bash
 for n in node-a node-b; do
-  cp secrets/node-tailscale.sops.yaml.example secrets/$n-tailscale.sops.yaml
-  $EDITOR secrets/$n-tailscale.sops.yaml      # paste tskey-auth-…
-  sops -e -i secrets/$n-tailscale.sops.yaml
+  cp secrets/node.enc.yaml.example secrets/$n.enc.yaml
+  $EDITOR secrets/$n.enc.yaml      # paste tskey-auth-…
+  sops -e -i secrets/$n.enc.yaml
 done
 ```
 
@@ -224,18 +224,18 @@ creation_rules:
   # Per-node authkey → ONLY its node + workstation (minimal blast radius — a
   # tag:garage authkey is a cluster-join credential, doc 09 §8). List the specific
   # rules BEFORE any generic `*-tailscale` rule so sops matches the right one.
-  - path_regex: secrets/node-a-tailscale\.sops\.ya?ml$
+  - path_regex: secrets/node-a\.enc\.ya?ml$
     key_groups: [ { age: [ *fleet_workstation, *node_a ] } ]
-  - path_regex: secrets/node-b-tailscale\.sops\.ya?ml$
+  - path_regex: secrets/node-b\.enc\.ya?ml$
     key_groups: [ { age: [ *fleet_workstation, *node_b ] } ]
 ```
 
 ```bash
-sops updatekeys secrets/common.sops.yaml
-sops updatekeys secrets/node-a-tailscale.sops.yaml
-sops updatekeys secrets/node-b-tailscale.sops.yaml
-sops -d secrets/common.sops.yaml >/dev/null && echo "decrypt OK"
-grep -L 'sops:' secrets/*.sops.yaml || echo "all sops files encrypted"   # must print nothing but the echo
+sops updatekeys secrets/common.enc.yaml
+sops updatekeys secrets/node-a.enc.yaml
+sops updatekeys secrets/node-b.enc.yaml
+sops -d secrets/common.enc.yaml >/dev/null && echo "decrypt OK"
+grep -L 'sops:' secrets/*.enc.yaml || echo "all sops files encrypted"   # must print nothing but the echo
 ```
 
 ## 0.5 Tailscale ACL (deny-by-default)
@@ -290,12 +290,12 @@ On a **second** USB (the payload), copy the whole repo **plus** the per-node
 `*-extra/` dir (gitignored, so it is not in the working-tree copy):
 
 ```
-garage-fleet/                                   # whole dir incl. encrypted secrets/*.sops.yaml
+garage-fleet/                                   # whole dir incl. encrypted secrets/*.enc.yaml
 garage-fleet/node-a-extra/etc/ssh/ssh_host_ed25519_key{,.pub}
 garage-fleet/node-b-extra/etc/ssh/ssh_host_ed25519_key{,.pub}
 ```
 
-**Phase 0 gate:** `nix flake check` passes; `sops -d secrets/common.sops.yaml`
+**Phase 0 gate:** `nix flake check` passes; `sops -d secrets/common.enc.yaml`
 works; ACL saved + `tag:garage` exists + 2 authkeys minted; break-glass in 2
 locations; both installer + payload USBs ready.
 

@@ -31,8 +31,8 @@ garage-fleet/
   private-keys/             # gitignored: fleet age key + per-node SSH host keys
   secrets/
     gen-secrets.sh                      # (legacy) manual fleet-key + token minting
-    common.sops.yaml.example            # TEMPLATE: rpc_secret + admin/metrics tokens
-    node-tailscale.sops.yaml.example    # TEMPLATE: per-node tag:garage auth key
+    common.enc.yaml.example            # TEMPLATE: rpc_secret + admin/metrics tokens
+    node.enc.yaml.example    # TEMPLATE: per-node tag:garage auth key
   modules/
     base.nix        # ssh hardening, nftables firewall, users, boot gens, nix
     sops.nix        # sops-nix wiring (age from SSH host key), secret entries
@@ -118,11 +118,11 @@ This mints the **fleet** age keypair (a separate trust domain — never the prod
 Then:
 
 1. Paste the printed recipient into `.sops.yaml` (replace every `age1FLEET…`).
-2. `cp secrets/common.sops.yaml.example secrets/common.sops.yaml`, fill the
-   three values, `sops -e -i secrets/common.sops.yaml`.
+2. `cp secrets/common.enc.yaml.example secrets/common.enc.yaml`, fill the
+   three values, `sops -e -i secrets/common.enc.yaml`.
 3. Mint a reusable, non-ephemeral, **tag:garage** auth key in the Tailscale
-   admin console; `cp secrets/node-tailscale.sops.yaml.example
-   secrets/<node>-tailscale.sops.yaml` per node, paste the key, `sops -e -i`.
+   admin console; `cp secrets/node.enc.yaml.example
+   secrets/<node>.enc.yaml` per node, paste the key, `sops -e -i`.
 4. **Break-glass:** copy the fleet age **private** key, the ZFS passphrase, and
    the restic/Kopia/age repo passwords offline to **two physical locations**
    (doc 09 §8). These are catastrophic-loss; the ZFS key is unrecoverable from a
