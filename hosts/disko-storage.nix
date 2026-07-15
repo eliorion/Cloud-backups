@@ -128,15 +128,27 @@ in
         # Garage metadata (LMDB) — small recordsize. Size for LMDB + Garage
         # metadata snapshots, which can transiently need ~4x the DB size
         # (doc 09 §11). Put on SSD where possible.
+        # ⚠️ noauto+nofail is LOAD-BEARING — see the long note in
+        # hosts/disko-node-a.nix. Locked-at-boot datasets declared as REQUIRED
+        # mounts fail local-fs.target and strand the node in emergency.target with
+        # no sshd. On an OFFSITE node that means a site visit.
         "garage/meta" = {
           type = "zfs_fs";
           mountpoint = "/srv/garage/meta";
+          mountOptions = [
+            "noauto"
+            "nofail"
+          ];
           options.recordsize = "16K";
         };
         # Garage object data — large recordsize + compression.
         "garage/data" = {
           type = "zfs_fs";
           mountpoint = "/srv/garage/data";
+          mountOptions = [
+            "noauto"
+            "nofail"
+          ];
           options.recordsize = "1M";
         };
       };
