@@ -115,10 +115,19 @@ in
           xattr = "sa";
         };
         options.ashift = "12";
+        # wpool ≈ 408 GiB (476.9 NVMe - 0.5 ESP - 60 root - 8 swap). `dev` and
+        # `docker` are siblings in ONE pool, so without limits ZFS hands space to
+        # whoever asks first: a week of devcontainer image churn fills the pool and
+        # `git clone` starts failing with ENOSPC (and vice versa). Reserve the dev
+        # side, cap the docker side, leave ~50G of slack either can borrow.
+        # Both are live-tunable later (`zfs set quota=… / reservation=…`) — unlike
+        # the partition sizes above, which are fixed at format.
         datasets = {
           "dev" = {
             type = "zfs_fs";
             mountpoint = "/home/dev"; # dev user home (source, build caches)
+            # GUARANTEE: docker can never take this 200G, however badly it churns.
+            options.reservation = "200G";
           };
           # Docker's data-root. MUST be its own dataset on wpool: dockerd uses the
           # native `zfs` storage driver (modules/workstation.nix) and creates one
@@ -127,6 +136,9 @@ in
           "docker" = {
             type = "zfs_fs";
             mountpoint = "/var/lib/docker";
+            # CEILING: dangling layers accumulate between weekly autoPrune runs.
+            # `docker` hitting this fails a build; without it, it fails the POOL.
+            options.quota = "150G";
           };
         };
       };
