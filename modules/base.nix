@@ -110,6 +110,13 @@
     users.users.root.openssh.authorizedKeys.keys = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDW1Q2aJgg7HzWHshxgu2alaNuSQ4JV23PSDoP9bY1qu skh@MacBook-Air-de-samuel-3.local"
     ];
+    # CONSOLE rescue only — this does NOT weaken ssh, which stays key-only
+    # (PasswordAuthentication=false below). Without it, mutableUsers=false leaves
+    # root locked and sulogin unusable, so any boot that fails before sshd is
+    # recoverable ONLY with physical install media. See modules/sops.nix for why
+    # the secret must be neededForUsers. It lives in the PER-NODE file, so each
+    # node has its own root password; a missing key is caught at BUILD time.
+    users.users.root.hashedPasswordFile = config.sops.secrets."root_password_hash".path;
     security.sudo.wheelNeedsPassword = false;
 
     # --- openssh: key only, no passwords -------------------------------------

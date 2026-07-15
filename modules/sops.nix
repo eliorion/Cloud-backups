@@ -10,6 +10,15 @@
 # Secrets are decrypted at activation into /run/secrets/<name>, owned by their
 # consuming service, with restartUnits wired so rotation restarts the unit.
 { config, lib, ... }:
+let
+  # Two files per node, by design (.sops.yaml encrypts them to different recipients):
+  #   common.enc.yaml   — identical on every node, encrypted to ALL nodes
+  #   <hostname>.enc.yaml — THIS node only, encrypted to this node + workstation
+  # Derived from hostName rather than wired per host, so a new node needs no
+  # sops.nix edit: `fleet new <node>` drops in the file and the .sops.yaml rule.
+  commonSecrets = ../secrets/common.enc.yaml;
+  nodeSecrets = ../secrets + "/${config.networking.hostName}.enc.yaml";
+in
 {
   sops = {
     # Derive the node's age key from its SSH host key (ssh-to-age). No standalone
@@ -17,25 +26,50 @@
     age.sshKeyPaths = [ "/etc/ssh/ssh_host_ed25519_key" ];
     age.generateKey = false;
 
-    # --- shared cluster secrets (secrets/common.sops.yaml) -------------------
+    # --- console rescue: root's password hash (PER NODE) ----------------------
+    # modules/base.nix sets users.mutableUsers = false and no root password, which
+    # makes root a LOCKED account: if a node ever reaches emergency.target, sulogin
+    # refuses every login ("root account is locked") and the only way in is physical
+    # media. node-A hit exactly that (see hosts/disko-node-a.nix noauto note).
+    #
+    # Lives in the PER-NODE file: each node gets its own root password, so a
+    # console credential recovered from one node does not open the other three.
+    #
+    # neededForUsers is REQUIRED and not decorative: it stages this secret in the
+    # early activation phase that runs BEFORE update-users-groups.pl writes
+    # /etc/shadow. A normal secret is materialised too late and root stays locked.
+    # Such secrets cannot take owner/group (users do not exist yet) — mode only.
+    #
+    # `root_password_hash` must exist in secrets/<node>.enc.yaml. sops-nix
+    # validates the manifest at BUILD time, so a missing key fails `nix flake
+    # check` / `fleet install` outright — it cannot reach a node and brick it.
+    # Add one per node (each node gets its OWN password):
+    #      nix develop -c openssl passwd -6           # copy the $6$… hash
+    #      nix develop -c sops edit secrets/node-a.enc.yaml
+    secrets."root_password_hash" = {
+      sopsFile = nodeSecrets;
+      neededForUsers = true;
+    };
+
+    # --- shared cluster secrets (secrets/common.enc.yaml) --------------------
     # The .example ships placeholders; the operator encrypts the real file with
     # gen-secrets.sh. Garage reads these via *_file keys (modules/garage.nix).
     secrets."rpc_secret" = {
-      sopsFile = ../secrets/common.sops.yaml;
+      sopsFile = commonSecrets;
       owner = "garage";
       group = "garage";
       mode = "0400";
       restartUnits = [ "garage.service" ];
     };
     secrets."admin_token" = {
-      sopsFile = ../secrets/common.sops.yaml;
+      sopsFile = commonSecrets;
       owner = "garage";
       group = "garage";
       mode = "0400";
       restartUnits = [ "garage.service" ];
     };
     secrets."metrics_token" = {
-      sopsFile = ../secrets/common.sops.yaml;
+      sopsFile = commonSecrets;
       owner = "garage";
       group = "garage";
       mode = "0400";
@@ -60,7 +94,7 @@
     # fleet.zfsAutoUnlock = true (auto-unlock at boot from sops). node-D and every
     # prompt-unlock node never reference it.
     secrets."zfs-passphrase" = lib.mkIf config.fleet.zfsAutoUnlock {
-      sopsFile = ../secrets/common.sops.yaml;
+      sopsFile = nodeSecrets;
       owner = "root";
       group = "root";
       mode = "0400";
@@ -72,10 +106,12 @@
       #   at file:///tmp/zfs.key (install seed only).
     };
 
-    # --- per-node Tailscale auth key (secrets/<node>-tailscale.sops.yaml) -----
-    # sopsFile is set PER HOST in hosts/*.nix (each node has its own file), so
-    # only the path-independent bits live here.
+    # --- per-node Tailscale auth key (secrets/<node>.enc.yaml) ----------------
+    # sopsFile is DERIVED from hostName (nodeSecrets above) — it used to be wired
+    # by hand in each hosts/*.nix. `key` remaps the YAML field: the file stores it
+    # as `authkey`, sops-nix exposes it as tailscale-authkey.
     secrets."tailscale-authkey" = {
+      sopsFile = nodeSecrets;
       key = "authkey";
       mode = "0400";
       # consumed by tailscaled at first up; no restartUnits (re-auth is manual).
