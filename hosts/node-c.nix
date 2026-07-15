@@ -19,7 +19,6 @@
     tailscaleIp = "100.64.0.12";
   };
 
-  sops.secrets."tailscale-authkey".sopsFile = ../secrets/node-c-tailscale.sops.yaml;
 
   # ⚠️ Same offsite whole-box-theft boot-trust note as node-b (doc 09 §7).
 

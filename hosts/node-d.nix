@@ -44,7 +44,6 @@
     tailscaleIp = "100.64.0.13";
   };
 
-  sops.secrets."tailscale-authkey".sopsFile = ../secrets/node-d-tailscale.sops.yaml;
 
   # Layout: garage layout assign <id-D> --gateway   (capacity 0, NO zone)
   #         garage layout apply --version <prev+1>   (doc 10 Phase 3)

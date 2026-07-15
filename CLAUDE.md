@@ -42,8 +42,8 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
   `disko-storage.nix` (C: single encrypted pool), `disko-gateway.nix` (boot+root
   only, greenfield D rebuild). Encrypted datasets use `keylocation=prompt` at
   runtime, `file://${fleet.zfsInstallKeyfile}` only under the `-install` variant.
-- `secrets/` — `gen-secrets.sh`, `common.sops.yaml.example`,
-  `node-tailscale.sops.yaml.example`
+- `secrets/` — `gen-secrets.sh`, `common.enc.yaml.example`,
+  `node.enc.yaml.example`
 - `.sops.yaml` — **FLEET** age recipients (separate trust domain from prod)
 
 Node roles: `node-a` onsite storage; `node-b` offsite-1 storage+proxy; `node-c`
@@ -86,12 +86,12 @@ already in production** — reconfigure it **additively** (do not import
   `tag:k8s → tag:garage` on **`tcp:3900` only** (never RPC `3901`, never admin `3903`).
 - Secrets: SOPS whole-file encryption (flat key/value for sops-nix, not k8s
   Secrets — no `encrypted_regex`). Use **FLEET** age recipients only — never reuse
-  the prod cluster's `age137z0k…`/`age1heestk…` keys. Real `secrets/*.sops.yaml`
+  the prod cluster's `age137z0k…`/`age1heestk…` keys. Real `secrets/*.enc.yaml`
   **must be committed** (a flake copies only git-tracked files into the store, so a
   gitignored secret is invisible to sops-nix activation). Verify each is encrypted
-  before committing (`grep -L 'sops:' secrets/*.sops.yaml` returns nothing). Never
+  before committing (`grep -L 'sops:' secrets/*.enc.yaml` returns nothing). Never
   commit plaintext secrets or the ZFS/age private keys.
-- **`flake.lock` MUST be committed** — same rule as `secrets/*.sops.yaml`: a flake's
+- **`flake.lock` MUST be committed** — same rule as `secrets/*.enc.yaml`: a flake's
   source is its git-tracked files, so a gitignored lock is invisible to nix, which
   then re-resolves every input to upstream HEAD on each command and pins nothing.
   Renovate tracks inputs. `nixos-anywhere` is an input too (`nix run .#nixos-anywhere`

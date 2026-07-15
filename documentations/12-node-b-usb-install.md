@@ -66,24 +66,24 @@ Paste the printed `age1…` **recipient** into `.sops.yaml` replacing the
 `age1FLEET…` placeholder.
 
 > **Note:** we are prompt-unlocking, so **do NOT put `zfs-passphrase` in
-> `common.sops.yaml`.** The flake edit in §1.5 (`modules/sops.nix`) makes that
+> `common.enc.yaml`.** The flake edit in §1.5 (`modules/sops.nix`) makes that
 > secret conditional on `fleet.zfsAutoUnlock`, which node-B sets to `false`.
 
 Create the encrypted shared secrets (rpc/admin/metrics only):
 
 ```bash
-cp secrets/common.sops.yaml.example secrets/common.sops.yaml
-$EDITOR secrets/common.sops.yaml          # paste rpc_secret/admin_token/metrics_token; DELETE the zfs-passphrase line
-sops -e -i secrets/common.sops.yaml
+cp secrets/common.enc.yaml.example secrets/common.enc.yaml
+$EDITOR secrets/common.enc.yaml          # paste rpc_secret/admin_token/metrics_token; DELETE the zfs-passphrase line
+sops -e -i secrets/common.enc.yaml
 ```
 
 Tailscale auth key (mint in the admin console: reusable, non-ephemeral,
 `tag:garage`):
 
 ```bash
-cp secrets/node-tailscale.sops.yaml.example secrets/node-b-tailscale.sops.yaml
-$EDITOR secrets/node-b-tailscale.sops.yaml   # paste tskey-auth-…
-sops -e -i secrets/node-b-tailscale.sops.yaml
+cp secrets/node.enc.yaml.example secrets/node-b.enc.yaml
+$EDITOR secrets/node-b.enc.yaml   # paste tskey-auth-…
+sops -e -i secrets/node-b.enc.yaml
 ```
 
 ### 1.2 Pre-generate node-B's SSH host key (the sops identity)
@@ -101,7 +101,7 @@ ssh-to-age -i node-b-extra/etc/ssh/ssh_host_ed25519_key.pub
 ### 1.3 Add node-B as a recipient + re-encrypt
 
 In `.sops.yaml`: add the anchor and reference it under **both** creation rules
-(`common` and `*-tailscale`):
+(`common` and the per-node rule):
 
 ```yaml
 keys:
@@ -109,12 +109,12 @@ keys:
   - &node_b           age1…            # from 1.2 (ssh-to-age output)
 
 creation_rules:
-  - path_regex: secrets/common\.sops\.ya?ml$
+  - path_regex: secrets/common\.enc\.ya?ml$
     key_groups:
       - age:
           - *fleet_workstation
           - *node_b
-  - path_regex: secrets/.*-tailscale\.sops\.ya?ml$
+  - path_regex: secrets/node-b\.enc\.ya?ml$
     key_groups:
       - age:
           - *fleet_workstation
@@ -124,9 +124,9 @@ creation_rules:
 Re-encrypt the two files to the new recipient set:
 
 ```bash
-sops updatekeys secrets/common.sops.yaml
-sops updatekeys secrets/node-b-tailscale.sops.yaml
-sops -d secrets/common.sops.yaml >/dev/null && echo "decrypt OK"
+sops updatekeys secrets/common.enc.yaml
+sops updatekeys secrets/node-b.enc.yaml
+sops -d secrets/common.enc.yaml >/dev/null && echo "decrypt OK"
 ```
 
 ### 1.4 New files
@@ -330,7 +330,7 @@ module is correct for this hardware.)
     sanoidDatasets = [ "npool/garage" "dpool/garage" ];
   };
 
-  sops.secrets."tailscale-authkey".sopsFile = ../secrets/node-b-tailscale.sops.yaml;
+  sops.secrets."tailscale-authkey".sopsFile = ../secrets/node-b.enc.yaml;
 }
 ```
 
@@ -464,13 +464,13 @@ Copy these onto your **second USB stick** (or anywhere you can reach from the
 box). Do **not** put the host *private* key in git.
 
 ```
-garage-fleet/                      # the whole dir (incl. encrypted secrets/*.sops.yaml)
+garage-fleet/                      # the whole dir (incl. encrypted secrets/*.enc.yaml)
 garage-fleet/node-b-extra/etc/ssh/ssh_host_ed25519_key       # the private key
 garage-fleet/node-b-extra/etc/ssh/ssh_host_ed25519_key.pub
 ```
 
 `node-b-extra/` is gitignored, so when you copy the **git working tree** it won't
-be included — copy it explicitly. (The encrypted `secrets/*.sops.yaml` **are**
+be included — copy it explicitly. (The encrypted `secrets/*.enc.yaml` **are**
 tracked and must be present in the flake source.)
 
 ---
@@ -682,7 +682,7 @@ $GARAGE bucket info smoke
 
 - **(a) auto-unlock via sops** (weaker offsite theft story): set
   `fleet.zfsAutoUnlock = true` in `node-b.nix`, put `zfs-passphrase` in
-  `common.sops.yaml` (re-encrypt), and change both pools'
+  `common.enc.yaml` (re-encrypt), and change both pools'
   `keylocation = "prompt"` → `keylocation = "file://${config.sops.secrets."zfs-passphrase".path}"`
   plus a boot `zfs load-key` unit ordered after sops-nix. Box then unlocks itself.
 - **(b) no data encryption**: drop the three `encryption`/`keyformat`/`keylocation`

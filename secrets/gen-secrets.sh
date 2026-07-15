@@ -8,7 +8,7 @@
 #   3. prints the age RECIPIENT to paste into garage-fleet/.sops.yaml;
 #   4. shows how to materialise + `sops -e` the .example templates.
 #
-# It does NOT write any *.sops.yaml (encrypted) file and does NOT touch the
+# It does NOT write any *.enc.yaml (encrypted) file and does NOT touch the
 # prod cluster's keys. Run it on your workstation, from the garage-fleet root:
 #
 #     ./secrets/gen-secrets.sh
@@ -63,7 +63,7 @@ METRICS_TOKEN="$(openssl rand -hex 32)"
 # install seed (hosts/disko-storage.nix). Catastrophic-loss break-glass item.
 ZFS_PASSPHRASE="$(openssl rand -base64 32)"
 
-echo "==> Generated shared Garage secrets. Put them in common.sops.yaml:"
+echo "==> Generated shared Garage secrets. Put them in common.enc.yaml:"
 echo
 echo "        rpc_secret     = ${RPC_SECRET}"
 echo "        admin_token    = ${ADMIN_TOKEN}"
@@ -82,20 +82,20 @@ cat <<EOF
   export SOPS_AGE_KEY_FILE="${AGE_KEY_FILE}"
 
   # b) Shared secrets — copy the template, fill the values printed above:
-  cp "${SCRIPT_DIR}/common.sops.yaml.example" "${SCRIPT_DIR}/common.sops.yaml"
-  \$EDITOR "${SCRIPT_DIR}/common.sops.yaml"        # paste rpc/admin/metrics/zfs-passphrase
-  sops -e -i "${SCRIPT_DIR}/common.sops.yaml"       # encrypt in place
+  cp "${SCRIPT_DIR}/common.enc.yaml.example" "${SCRIPT_DIR}/common.enc.yaml"
+  \$EDITOR "${SCRIPT_DIR}/common.enc.yaml"        # paste rpc/admin/metrics/zfs-passphrase
+  sops -e -i "${SCRIPT_DIR}/common.enc.yaml"       # encrypt in place
 
   # c) Per-node Tailscale auth key (mint a reusable, non-ephemeral, tagged key
   #    in the Tailscale admin console with tag:garage — doc 09 §8, doc 10 P0):
   for n in node-a node-b node-c node-d; do
-    cp "${SCRIPT_DIR}/node-tailscale.sops.yaml.example" "${SCRIPT_DIR}/\${n}-tailscale.sops.yaml"
-    \$EDITOR "${SCRIPT_DIR}/\${n}-tailscale.sops.yaml" # paste tskey-auth-…
-    sops -e -i "${SCRIPT_DIR}/\${n}-tailscale.sops.yaml"
+    cp "${SCRIPT_DIR}/node.enc.yaml.example" "${SCRIPT_DIR}/\${n}.enc.yaml"
+    \$EDITOR "${SCRIPT_DIR}/\${n}.enc.yaml" # paste tskey-auth-…
+    sops -e -i "${SCRIPT_DIR}/\${n}.enc.yaml"
   done
 
   # d) Verify a node can decrypt (after adding its recipient + re-encrypting):
-  sops -d "${SCRIPT_DIR}/common.sops.yaml" >/dev/null && echo "decrypt OK"
+  sops -d "${SCRIPT_DIR}/common.enc.yaml" >/dev/null && echo "decrypt OK"
 
 ==> Reminder: ZFS dataset passphrase + restic/Kopia/age repo passwords are also
     break-glass items (doc 09 §8). The ZFS key is seeded at install via
