@@ -127,8 +127,25 @@ nix --version                      # flakes-enabled nix (2.x)
 
 Security invariants (from doc 09/12, do not break):
 
-- ZFS passphrase **never** stored on the box — typed at format, re-typed at each
-  unlock. Keep it offline in **two** physical locations.
+- ZFS passphrase **never** stored on the box **or in any sops file** — typed at
+  format, re-typed at each unlock. Keep it offline (password manager + a second
+  physical copy). `<node>.enc.yaml` SHIPS to the node and the node can decrypt it
+  (its age key comes from its SSH host key on the unencrypted root), so a stored
+  passphrase = a stolen box unlocks its own backups while you still type it every
+  reboot. `keylocation=prompt` has **no recovery path** — lose it, lose the pool.
+- **One passphrase PER NODE**, never one shared across the fleet. A shared value in
+  `common.enc.yaml` (encrypted to every node) means compromising node-A — which
+  runs arbitrary devcontainer code as effective root — yields node-B's and
+  node-C's too.
+- ⚠️ **The fleet age key never lands on node-A.** `private-keys/garage-fleet.txt`
+  decrypts EVERY node's secrets. node-A is the DevPod host with `dev` in the
+  `docker` group (root-equivalent), so copying the key there to run `fleet` locally
+  hands the whole fleet to anything that escapes a container. Run `fleet` from the
+  workstation devcontainer; node-A is for dev work only. Break-glass copy goes in
+  the password manager — `private-keys/` is gitignored and CANNOT be regenerated.
+- Only the `$6$` **hash** of each node's root password goes in `<node>.enc.yaml`;
+  the plaintext lives in the password manager. Unique per node — reuse turns your
+  most exposed box into the weakest link for a credential used elsewhere.
 - SSH host **private** key reaches the box by **direct copy** to `/mnt/etc/ssh`,
   **never** through the Nix store.
 - The `garage` user gets **zero** `zfs allow` (the snapshot moat depends on it).

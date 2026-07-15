@@ -91,6 +91,31 @@ already in production** — reconfigure it **additively** (do not import
   gitignored secret is invisible to sops-nix activation). Verify each is encrypted
   before committing (`grep -L 'sops:' secrets/*.enc.yaml` returns nothing). Never
   commit plaintext secrets or the ZFS/age private keys.
+- **Secrets layout** — `common.enc.yaml` = ONLY fleet-identical values
+  (`rpc_secret`/`admin_token`/`metrics_token`), encrypted to every node.
+  `<node>.enc.yaml` = everything node-specific (`authkey`, `root_password_hash`),
+  encrypted to that node + workstation ONLY, so a compromised node cannot read any
+  other node's. `modules/sops.nix` DERIVES the per-node file from
+  `networking.hostName` — never wire `sopsFile` per host. A missing key fails at
+  BUILD time (sops-nix validates the manifest), so it cannot brick a node.
+  Edit with `sops edit` — `sops decrypt > file.yaml` leaves plaintext in the tree
+  (`.gitignore` denies `secrets/*.yaml`, but do not rely on it).
+- **Never put `zfs-passphrase` in ANY sops file.** The node's age key is derived
+  from its SSH host key on the UNENCRYPTED root, and `<node>.enc.yaml` ships to the
+  node — so a stored passphrase means a stolen box unlocks its own backups, while
+  you still type it at every reboot (worst of both). Keep it OFFLINE (password
+  manager + a second physical copy); typed at `fleet install` and each unlock.
+  `keylocation=prompt` has **no recovery path**. Same for per-node root passwords:
+  only the `$6$` hash goes in sops, the plaintext lives in the password manager.
+- ⚠️ **The fleet age key (`private-keys/garage-fleet.txt`) must NEVER land on
+  node-A.** It decrypts EVERY node's secrets. node-A is the DevPod devcontainer
+  host and runs arbitrary third-party code as effective root (`docker` group,
+  `modules/workstation.nix`), so copying the key there to "run fleet locally"
+  hands the whole fleet to anything that escapes a container — and collapses the
+  per-node isolation above. Run `scripts/fleet` from the workstation devcontainer
+  only; node-A is for dev work. Keep a break-glass copy in the password manager,
+  never in the repo (`private-keys/` is gitignored and CANNOT be regenerated —
+  `fleet` refuses, since a new key cannot decrypt existing secrets).
 - **`flake.lock` MUST be committed** — same rule as `secrets/*.enc.yaml`: a flake's
   source is its git-tracked files, so a gitignored lock is invisible to nix, which
   then re-resolves every input to upstream HEAD on each command and pins nothing.
