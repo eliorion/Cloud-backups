@@ -118,7 +118,15 @@ in
         datasets = {
           "dev" = {
             type = "zfs_fs";
-            mountpoint = "/home/dev"; # dev user home → podman graphroot lives here
+            mountpoint = "/home/dev"; # dev user home (source, build caches)
+          };
+          # Docker's data-root. MUST be its own dataset on wpool: dockerd uses the
+          # native `zfs` storage driver (modules/workstation.nix) and creates one
+          # child dataset per image layer under here. Left at the default
+          # /var/lib/docker it would fill the 60G ext4 root instead of the NVMe pool.
+          "docker" = {
+            type = "zfs_fs";
+            mountpoint = "/var/lib/docker";
           };
         };
       };
