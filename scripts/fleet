@@ -458,6 +458,13 @@ cmd_install() {
     hdr "post-boot: restore prompt-unlock + bring Garage up"
     note "The install keyfile is gone (tmpfs). Switch the encrypted datasets back to"
     note "prompt-unlock and unlock them now (you'll re-type the SAME passphrase)."
+    # The box is REBOOTING into the installed system; sshd is not listening yet, so
+    # finalizing immediately fails with "Connection refused". Wait for it.
+    wait_for_ssh "$target" || {
+      warn "$target did not come back within the timeout — finalize skipped."
+      print_finalize "$target" "$node"
+      return 0
+    }
     if confirm "run the finalize over ssh -t $target now?"; then
       finalize_storage "$target"
     else
@@ -469,6 +476,27 @@ cmd_install() {
   note "Note $node's tailnet IP ('tailscale status' on the box), set fleet.tailscaleIp,"
   note "set the tailnet ('fleet config tailnet <name>'), commit, then: fleet deploy $node"
   note "Apply the Garage layout ONCE (prev+1) — see: fleet guide $node"
+}
+
+# Poll until the target's sshd answers. nixos-anywhere reboots the box at the end
+# of the install, so anything that ssh's immediately hits "Connection refused"
+# (port closed, host already up) — a race, not a failure. Also re-keys the host in
+# known_hosts: the installed system serves the host key we SEEDED, not the
+# installer's ephemeral one, so ssh would otherwise abort with
+# "REMOTE HOST IDENTIFICATION HAS CHANGED".
+wait_for_ssh() {
+  local target="$1" tries="${2:-60}" host="${target#*@}" i=0
+  note "waiting for $host to finish rebooting and start sshd…"
+  ssh-keygen -R "$host" >/dev/null 2>&1 || true
+  while (( i < tries )); do
+    if ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+           -o BatchMode=yes -o ConnectTimeout=5 "$target" true >/dev/null 2>&1; then
+      ok "$host is up (host key accepted — it is the key seeded via --extra-files)"
+      return 0
+    fi
+    sleep 5; i=$(( i + 1 ))
+  done
+  return 1
 }
 
 # Switch any file://-keyed datasets back to prompt and unlock them. The unlock
@@ -506,6 +534,27 @@ EOF
 }
 
 # ============================================================================= deploy
+# Retry the post-install finalize on its own. `install` offers it once, but the box
+# is still rebooting at that moment — if that attempt is declined or races the
+# reboot, there was previously NO way back except re-wiping the disks. Also imports
+# the data pools first: after a fresh install they may not be imported yet, and
+# `zfs load-key` on a pool that is not imported fails "dataset does not exist".
+cmd_finalize() {
+  [[ $# -ge 2 ]] || die "usage: fleet finalize <node> <root@host>"
+  local node target; node="$(canon "$1")"; target="$2"
+  need ssh
+  is_storage "$node" || die "$node is not a storage node — nothing to finalize."
+  [[ "$target" == *@* ]] || die "target must be user@host (e.g. root@192.0.2.10)"
+  hdr "finalize $node -> $target"
+  wait_for_ssh "$target" 12 || die "$target is not answering ssh."
+  note "Importing any not-yet-imported data pools, then restoring prompt-unlock."
+  note "You will re-type the SAME ZFS passphrase used at install."
+  ssh -t -o BatchMode=no "$target" 'for p in $(zpool import 2>/dev/null | awk "/^  pool:/{print \$2}"); do
+  echo ">> importing $p"; zpool import "$p" || true
+done' || true
+  finalize_storage "$target"
+}
+
 cmd_deploy() {
   [[ $# -ge 1 ]] || die "usage: fleet deploy <node> [-- <extra deploy-rs args>]"
   local node; node="$(canon "$1")"; shift
@@ -867,7 +916,8 @@ cmd_menu() {
   ${B}fleet${R} — node lifecycle
     1) new <node>      scaffold + secrets
     2) install <node>  provision (nixos-anywhere)
-    3) deploy <node>   apply config (deploy-rs + rollback)
+    3) finalize <node> <root@host>  retry post-install unlock
+    4) deploy <node>   apply config (deploy-rs + rollback)
     4) rollback <node> previous generation
     5) secrets         edit / verify / commit
     6) config tailnet  set MagicDNS tailnet
@@ -895,6 +945,7 @@ main() {
   case "${1:-}" in
     new)      shift; cmd_new "$@";;
     install)  shift; cmd_install "$@";;
+    finalize) shift; cmd_finalize "$@";;
     deploy)   shift; cmd_deploy "$@";;
     rollback) shift; cmd_rollback "$@";;
     status)   shift; cmd_status "$@";;
