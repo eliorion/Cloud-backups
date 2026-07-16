@@ -3,14 +3,14 @@
 # CLIs used by documentations/12. Mirrors the main k3s workspace's mise setup.
 [tools]
 node = "lts"                         # Node.js >=18, required by caveman install (scripts/setup)
-# ⚠️ sops/age/ssh-to-age are PINNED to the SAME versions as the flake devShell
-# (flake.nix `nix develop`, pinned by flake.lock) — do NOT set them to "latest".
-# `latest` drifted sops to 3.13.2 and encrypted secrets in a form the box's
-# sops-nix could not decrypt at boot. Reproducible env = one version everywhere.
-# Bump these together with the nixpkgs input, never independently.
-sops = "3.11.0"                      # == flake devShell (nixpkgs 25.05)
-age = "1.2.1"
-"github:Mic92/ssh-to-age" = "1.1.11"
+# ⚠️ sops/age are DELIBERATELY NOT here. This repo's devcontainer is x86_64
+# EMULATED under Rosetta on an Apple-Silicon Mac, and Rosetta mis-translates Go's
+# asm ChaCha20-Poly1305 — so ANY prebuilt x86 sops/age (what mise ships) silently
+# produces CORRUPT age ciphertext that real nodes cannot decrypt (sops-nix fails
+# "0 successful groups"). Use `nix develop` instead: flake.nix builds sops/age with
+# `-tags=purego` (generic Go, Rosetta-safe). Run all sops/age via the devShell or
+# `nix run .#sops` / `.#age`. See flake.nix withPurego + memory node-a-cpu-aead-miscompute.
+"github:Mic92/ssh-to-age" = "1.1.11"  # key CONVERSION only (no AEAD), Rosetta-safe
 jq = "latest"
 shellcheck = "latest"
 uv = "latest"                        # for graphify (scripts/setup)
