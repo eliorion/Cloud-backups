@@ -1008,25 +1008,26 @@ cmd_menu() {
     cat <<EOF
 
   ${B}fleet${R} — node lifecycle
-    1) new <node>      scaffold + secrets
-    2) install <node>  provision (nixos-anywhere)
-    3) finalize <node> <root@host>  retry post-install unlock
-    4) deploy <node>   apply config (deploy-rs + rollback)
-    4) rollback <node> previous generation
-    5) secrets         edit / verify / commit
-    6) config tailnet  set MagicDNS tailnet
-    7) guide <node>    on-box fallback runbook
+    1) new <node>       scaffold + secrets
+    2) install <node>   provision (nixos-anywhere)
+    3) finalize <node>  retry post-install unlock (ssh)
+    4) deploy <node>    apply config (deploy-rs + rollback)
+    5) rollback <node>  previous generation
+    6) secrets          edit / verify / commit
+    7) config tailnet   set MagicDNS tailnet
+    8) guide <node>     on-box fallback runbook
     q) quit
 EOF
     local c; c="$(ask 'choice')"
     case "$c" in
       1) cmd_new   "$(ask 'node (a/b/c/d or node-x)')" ${TY:+--type "$TY"} || true; pause;;
       2) local n t; n="$(ask 'node')"; t="$(ask 'target (root@host)')"; cmd_install "$n" "$t" || true; pause;;
-      3) cmd_deploy   "$(ask 'node')" || true; pause;;
-      4) cmd_rollback "$(ask 'node')" || true; pause;;
-      5) cmd_secrets || true;;
-      6) cmd_config tailnet "$(ask 'tailnet name')" || true; pause;;
-      7) cmd_guide "$(ask 'node')" || true; pause;;
+      3) local n t; n="$(ask 'node')"; t="$(ask 'target (root@host)')"; cmd_finalize "$n" "$t" || true; pause;;
+      4) cmd_deploy   "$(ask 'node')" || true; pause;;
+      5) cmd_rollback "$(ask 'node')" || true; pause;;
+      6) cmd_secrets || true;;
+      7) cmd_config tailnet "$(ask 'tailnet name')" || true; pause;;
+      8) cmd_guide "$(ask 'node')" || true; pause;;
       q|Q|"") echo "bye."; return 0;;
       *) warn "unknown choice"; pause;;
     esac

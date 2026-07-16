@@ -98,10 +98,23 @@ in
       };
     };
 
+    # STATIC garage system user/group. nixpkgs runs services.garage as a systemd
+    # DynamicUser (no persistent user), but modules/sops.nix owns the garage
+    # secrets (rpc_secret/admin/metrics) `owner = "garage"` — so sops-nix's manifest
+    # validation aborts "unknown user garage" and NO secrets render (starving both
+    # garage and tailscale). A stable user also gives the ZFS data dirs a real
+    # owner. NO `zfs allow` is granted here — the snapshot moat depends on the
+    # garage user having none (doc 09 §7, modules/zfs-sanoid.nix).
+    users.groups.garage = { };
+    users.users.garage = {
+      isSystemUser = true;
+      group = "garage";
+      home = metaDir;
+      createHome = false;
+    };
+
     # Ensure the meta/data parent dir exists for the gateway (storage nodes get
-    # the ZFS dataset mountpoints from disko-storage.nix). garage user owns them
-    # but holds NO zfs allow on the datasets — the ZFS moat depends on that
-    # (doc 09 §7, enforced in modules/zfs-sanoid.nix on storage nodes).
+    # the ZFS dataset mountpoints from disko-storage.nix).
     systemd.tmpfiles.rules = lib.mkIf isGateway [
       "d ${metaDir} 0700 garage garage -"
       "d ${dataDir} 0700 garage garage -"
@@ -123,6 +136,19 @@ in
     # systemd SKIP the unit (not fail it), so a still-locked pool cannot drive a
     # restart loop. RestartSec covers a pool that mounts moments later.
     systemd.services.garage.serviceConfig = {
+      # Run as the static garage user (above), NOT a DynamicUser — see the user
+      # block for why (sops secrets are owner=garage). mkForce beats the nixpkgs
+      # module's DynamicUser=true default.
+      DynamicUser = lib.mkForce false;
+      User = "garage";
+      Group = "garage";
+      # meta+data are ZFS mountpoints created root-owned (disko), and on storage
+      # nodes they mount only after the post-boot manual unlock — so chown them to
+      # garage right before start. ConditionPathIsMountPoint guarantees they are
+      # mounted by now; the leading '+' runs this as root, not as garage.
+      ExecStartPre = [
+        "+${pkgs.coreutils}/bin/chown garage:garage ${metaDir} ${lib.concatStringsSep " " dataPaths}"
+      ];
       Restart = "on-failure";
       RestartSec = "10s";
     };

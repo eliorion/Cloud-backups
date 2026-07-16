@@ -3,13 +3,18 @@
 # CLIs used by documentations/12. Mirrors the main k3s workspace's mise setup.
 [tools]
 node = "lts"                         # Node.js >=18, required by caveman install (scripts/setup)
-sops = "latest"
-age = "latest"
+# ⚠️ sops/age/ssh-to-age are PINNED to the SAME versions as the flake devShell
+# (flake.nix `nix develop`, pinned by flake.lock) — do NOT set them to "latest".
+# `latest` drifted sops to 3.13.2 and encrypted secrets in a form the box's
+# sops-nix could not decrypt at boot. Reproducible env = one version everywhere.
+# Bump these together with the nixpkgs input, never independently.
+sops = "3.11.0"                      # == flake devShell (nixpkgs 25.05)
+age = "1.2.1"
+"github:Mic92/ssh-to-age" = "1.1.11"
 jq = "latest"
 shellcheck = "latest"
 uv = "latest"                        # for graphify (scripts/setup)
 gh = "latest"
-"github:Mic92/ssh-to-age" = "latest"
 # --- tasks: thin wrappers over the doc-12 workstation steps -------------------
 [tasks.lock]
 description = "Resolve flake inputs -> flake.lock (no build; arch-independent)"
