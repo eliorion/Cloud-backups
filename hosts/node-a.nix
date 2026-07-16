@@ -79,7 +79,7 @@
     zfsAutoUnlock = false;
 
     # TODO operator: node-A's tailscale0 overlay IP — set AFTER first join (doc 13).
-    tailscaleIp = "100.67.109.80";
+    tailscaleIp = "100.122.58.119";
 
     # ALL Garage data is on the HDD dpool now — the NVMe wpool is the dev
     # workstation pool (../modules/workstation.nix), NOT Garage. Single data_dir.
