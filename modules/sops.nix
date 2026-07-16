@@ -1,11 +1,15 @@
 # modules/sops.nix — sops-nix wiring for the fleet (doc 09 §8, doc 10 Phase 1).
 #
-# Each node's age identity is DERIVED from its Ed25519 SSH host key via
-# ssh-to-age (sshKeyPaths below), so there is no separate age key file to seed
-# or lose on the node. The host key itself is seeded at install via
-# nixos-anywhere --extra-files; its ssh-to-age recipient must be added to
-# garage-fleet/.sops.yaml and the secrets RE-ENCRYPTED before the first deploy,
-# or activation cannot decrypt and `switch` fails (doc 09 §8 bootstrap note).
+# Each node has a DEDICATED age key (age-keygen), private half in
+# private-keys/node-<x>-age.txt (gitignored), seeded at install to
+# /var/lib/sops-nix/key.txt (age.keyFile below) on the node's TPM-encrypted root.
+# Its recipient goes in .sops.yaml and the secrets are encrypted to it.
+#
+# ⚠️ This REPLACED the earlier "derive the age key from the SSH host key via
+# ssh-to-age" scheme. That failed at boot: sops-nix's bundled ssh-to-age
+# conversion produced an identity that could not decrypt the secrets (recipient
+# matched, payload auth failed) even though the standalone ssh-to-age + sops CLI
+# could. A native age key sidesteps the conversion entirely. (doc 14, commit log.)
 #
 # Secrets are decrypted at activation into /run/secrets/<name>, owned by their
 # consuming service, with restartUnits wired so rotation restarts the unit.
@@ -21,9 +25,11 @@ let
 in
 {
   sops = {
-    # Derive the node's age key from its SSH host key (ssh-to-age). No standalone
-    # /var/lib/sops-nix/key.txt to manage; the on-disk host key IS the identity.
-    age.sshKeyPaths = [ "/etc/ssh/ssh_host_ed25519_key" ];
+    # The node's DEDICATED age identity, seeded here at install (--extra-files /
+    # scripts/fleet) on the TPM-encrypted root. NOT sshKeyPaths (see header).
+    # generateKey=false: never auto-generate — a generated key would not match the
+    # recipient the secrets are encrypted to, so decryption would fail silently.
+    age.keyFile = "/var/lib/sops-nix/key.txt";
     age.generateKey = false;
 
     # --- console rescue: root's password hash (PER NODE) ----------------------
