@@ -79,13 +79,15 @@ already in production** — reconfigure it **additively** (do not import
 - **Provision** with disko + nixos-anywhere (`fleet install <node> root@host` wraps
   this against the `.#<node>-install` variant) (`--flake .#node-a`,
   `--disk-encryption-keys`, `--generate-hardware-config`). `--extra-files` seeds
-  BOTH the SSH host key AND the node's **dedicated age key** to
-  `/var/lib/sops-nix/key.txt` (`modules/sops.nix` `age.keyFile`) — WITHOUT the age
-  key, first-boot activation can't decrypt any secret and `switch` fails. `fleet
-  new <node>` mints that key (`private-keys/<node>-age.txt`) and writes its
-  recipient into `.sops.yaml`, so the recipient is set BEFORE install, not after.
-  (This replaced the old ssh-to-age-derived identity, which could not decrypt at
-  boot.)
+  ONLY the node's **dedicated age key** to `/var/lib/sops-nix/key.txt`
+  (`modules/sops.nix` `age.keyFile`) — the single required per-node key; WITHOUT it
+  first-boot activation can't decrypt any secret and `switch` fails. `fleet new
+  <node>` mints that key (`private-keys/<node>-age.txt`) and writes its recipient
+  into `.sops.yaml`, so the recipient is set BEFORE install, not after. (This
+  replaced the old ssh-to-age-derived identity, which could not decrypt at boot.)
+  The SSH host key is NOT seeded — `sshd` self-generates it on first boot, so a
+  reinstall changes the node's SSH fingerprint (`ssh-keygen -R <host>` to clear the
+  stale `known_hosts` entry).
 - **Garage layout** is imperative: `garage layout assign … -z <zone> -c <bytes>`,
   then `garage layout apply --version <prev+1>` — exactly `prev+1`, once.
 - **Garage version**: design target is `v2.3.0` (docs 09/10), but what actually
@@ -121,9 +123,11 @@ already in production** — reconfigure it **additively** (do not import
 - **Per-node identity = a DEDICATED age key**, `private-keys/<node>-age.txt`
   (gitignored, break-glass), whose recipient is in `.sops.yaml` and whose private
   half `fleet install` seeds to `/var/lib/sops-nix/key.txt` (`modules/sops.nix`
-  `age.keyFile`; `age.sshKeyPaths = mkForce []`). This REPLACED deriving the identity
-  from the SSH host key via ssh-to-age (which sops-nix's bundled ssh-to-age could
-  not decrypt at boot). The SSH host key is now only the node's SSH host identity.
+  `age.keyFile`; `age.sshKeyPaths = mkForce []`). It is the ONLY per-node key fleet
+  manages. This REPLACED deriving the identity from the SSH host key via ssh-to-age
+  (which sops-nix's bundled ssh-to-age could not decrypt at boot); the SSH host key
+  is no longer seeded at all — `sshd` self-generates it on first boot (only the
+  node's SSH server fingerprint, irrelevant to sops).
 - **Secrets layout** — `common.enc.yaml` = ONLY fleet-identical values
   (`rpc_secret`/`admin_token`/`metrics_token`), encrypted to every node.
   `<node>.enc.yaml` = everything node-specific (`authkey`, `root_password_hash`),

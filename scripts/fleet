@@ -8,10 +8,11 @@
 #   fleet                       Interactive TUI menu.
 #   fleet new   <node> [opts]   Scaffold + secrets for a node (idempotent).
 #                               Generates the fleet age key, shared secrets, the
-#                               node's SSH host key + DEDICATED age key
-#                               (-> private-keys/), its age recipient (-> .sops.yaml),
-#                               its Tailscale authkey, and — for a brand-new node —
-#                               its hosts/*.nix + disko + flake + .sops.yaml rule.
+#                               node's DEDICATED age key (-> private-keys/), its age
+#                               recipient (-> .sops.yaml), its Tailscale authkey, and
+#                               — for a brand-new node — its hosts/*.nix + disko +
+#                               flake + .sops.yaml rule. (No SSH host key: sshd
+#                               generates its own on first boot.)
 #                               Re-running SKIPS what already exists; --force regens.
 #   fleet install <node> <root@host>
 #                               First provision over the network with
@@ -31,11 +32,12 @@
 #   fleet guide   <node>        Print the on-box fallback runbook (doc 13).
 #
 # Tool needs:
-#   new / secrets : nix (purego sops/age from the flake), openssl, ssh-keygen, git.
+#   new / secrets : nix (purego sops/age from the flake), openssl, git.
 #                   sops/age MUST be the flake's -tags=purego builds — a stock/mise
 #                   binary silently corrupts age ciphertext on this Rosetta
 #                   (Apple-Silicon) workstation (see sops()/age()). Node identity is
-#                   a DEDICATED age key (private-keys/<node>-age.txt), NOT ssh-to-age.
+#                   ONE DEDICATED age key (private-keys/<node>-age.txt); the SSH host
+#                   key is not managed here (sshd self-generates it on first boot).
 #   install/deploy/rollback : nix (+ ssh)  — these build/activate the flake
 # Secrets are never echoed. private-keys/ + node-*-extra/ are gitignored and
 # never staged. Only ENCRYPTED secrets/*.enc.yaml are committed.
@@ -193,12 +195,11 @@ node_recipient_ready() {
   local s; s="$(suffix "$1")"
   grep -qE "^[[:space:]]*-[[:space:]]*&node_${s}[[:space:]]+age1" "$SOPS_YAML" && node_in_common_rule "$s"
 }
-host_key_path() { printf '%s/%s-ssh_host_ed25519_key' "$PRIVKEYS" "$1"; }
-# Each node's DEDICATED age identity (age-keygen). Private half kept here
-# (gitignored, break-glass), seeded at install to /var/lib/sops-nix/key.txt
-# (modules/sops.nix age.keyFile). THIS — not ssh-to-age of the SSH host key — is
-# what the secrets are encrypted to; the SSH host key is now only the node's SSH
-# host identity. (sops-nix's bundled ssh-to-age could not decrypt at boot.)
+# Each node's DEDICATED age identity (age-keygen) — the ONLY per-node key fleet
+# manages. Private half kept here (gitignored, break-glass), seeded at install to
+# /var/lib/sops-nix/key.txt (modules/sops.nix age.keyFile). THIS is what the secrets
+# are encrypted to. (The SSH host key is NOT seeded — sshd generates its own on
+# first boot; it is only the node's SSH server fingerprint, not the sops identity.)
 node_age_key_path()  { printf '%s/%s-age.txt' "$PRIVKEYS" "$1"; }
 node_age_recipient() { age_keygen -y "$(node_age_key_path "$1")" 2>/dev/null | tr -d '[:space:]'; }
 committed() { git -C "$ROOT" ls-files --error-unmatch "$1" >/dev/null 2>&1; }
@@ -256,23 +257,6 @@ ensure_common_secrets() {
   encrypted "$COMMON" || die "encryption of common.enc.yaml failed"
   ok "generated + encrypted shared secrets (rpc/admin/metrics)"
   note "ZFS passphrase is NOT stored here — typed at format + each unlock (prompt-unlock)."
-}
-
-ensure_host_key() {
-  local node="$1" hk; hk="$(host_key_path "$node")"
-  if [[ -f "$hk" && "$FORCE" != 1 ]]; then
-    ok "host key present ($hk)"
-  else
-    if [[ -f "$hk" && "$FORCE" == 1 ]]; then
-      warn "REGENERATING $node host key — its age identity changes; recipient + updatekeys must follow."
-      confirm "really regenerate $node host key?" || { ok "kept existing host key"; return; }
-    fi
-    mkdir -p "$PRIVKEYS"; chmod 700 "$PRIVKEYS"
-    rm -f "$hk" "$hk.pub"
-    ssh-keygen -t ed25519 -N "" -C "$node" -f "$hk" >/dev/null
-    chmod 600 "$hk"; chmod 644 "$hk.pub"
-    ok "generated host key ($hk)"
-  fi
 }
 
 # The node's DEDICATED age identity — what secrets/*.enc.yaml are encrypted to and
@@ -431,14 +415,13 @@ cmd_new() {
     --force) FORCE=1; shift;;
     *) die "unknown option: $1";;
   esac; done
-  for t in openssl ssh-keygen git; do need "$t"; done  # sops/age via the purego wrappers (nix)
+  for t in openssl git; do need "$t"; done  # sops/age via the purego wrappers (nix)
   [[ -f "$SOPS_YAML" ]] || die "run from the repo (.sops.yaml not found)"
   local type; type="$(type_of "$node")"
   hdr "new $node — type $type ($(type_desc "$type"))"
   ensure_fleet_key
   ensure_common_secrets
   scaffold_nix "$node"
-  ensure_host_key "$node"
   ensure_node_age_key "$node"
   ensure_recipient "$node"
   ensure_authkey "$node"
@@ -471,8 +454,7 @@ cmd_install() {
   require_nix install
   need ssh
   [[ "$target" == *@* ]] || die "target must be user@host (e.g. root@192.0.2.10)"
-  local hk ak; hk="$(host_key_path "$node")"; ak="$(node_age_key_path "$node")"
-  [[ -f "$hk" ]] || die "no SSH host key for $node — run: fleet new $node"
+  local ak; ak="$(node_age_key_path "$node")"
   [[ -f "$ak" ]] || die "no dedicated age key for $node ($ak) — run: fleet new $node"
   encrypted "$COMMON" || die "secrets/common.enc.yaml is not encrypted — run: fleet new $node"
   node_recipient_ready "$node" || die "$node recipient missing in .sops.yaml — run: fleet new $node"
@@ -533,12 +515,11 @@ cmd_install() {
   local xf kf_src="" kl_src=""
   xf="$(mktemp -d)"
   trap 'rm -rf "$xf" ${kf_src:+"$kf_src"} ${kl_src:+"$kl_src"}' RETURN
-  install -d -m700 "$xf/etc/ssh"
-  install -m600 "$hk"     "$xf/etc/ssh/ssh_host_ed25519_key"
-  install -m644 "$hk.pub" "$xf/etc/ssh/ssh_host_ed25519_key.pub"
   # The node's DEDICATED age identity -> /var/lib/sops-nix/key.txt (modules/sops.nix
-  # age.keyFile). WITHOUT this the node has no sops identity and first-boot
-  # activation cannot decrypt ANY secret. Mode 0400 root (the tree is copied as-is).
+  # age.keyFile) is the ONLY thing seeded. WITHOUT it the node has no sops identity
+  # and first-boot activation cannot decrypt ANY secret. Mode 0400 root (the tree is
+  # copied as-is). The SSH host key is NOT seeded — sshd generates its own on first
+  # boot (so a reinstall changes the node's SSH fingerprint: ssh-keygen -R <host>).
   install -d -m700 "$xf/var/lib/sops-nix"
   install -m400 "$ak" "$xf/var/lib/sops-nix/key.txt"
   local dek=()
@@ -783,13 +764,13 @@ cmd_status() {
   # cell (mk), so headers and glyphs line up exactly. Prefix = 2+8+1+21 = 32. -----
   local rule; rule="$(printf '─%.0s' $(seq 1 86))"
   printf '\n  %s%-8s %-21s%s' "$B" 'NODE' 'ROLE' "$R"
-  local h; for h in keys recip authkey commit install deploy; do printf '  %s%-7s%s' "$B" "$h" "$R"; done; printf '\n'
+  local h; for h in agekey recip authkey commit install deploy; do printf '  %s%-7s%s' "$B" "$h" "$R"; done; printf '\n'
   printf '  %s%s%s\n' "$D" "$rule" "$R"
   local node type ts
   for node in "${nodes[@]}"; do
     type="$(type_of "$node" 2>/dev/null || echo '?')"; ts="$SECRETS/$node.enc.yaml"
     printf '  %-8s %-21s' "$node" "$(type_short "$type")"
-    printf '  %s      ' "$([[ -f "$(host_key_path "$node")" && -f "$(node_age_key_path "$node")" ]] && mk ok || mk no)"
+    printf '  %s      ' "$([[ -f "$(node_age_key_path "$node")" ]] && mk ok || mk no)"
     printf '  %s      ' "$(node_recipient_ready "$node" && mk ok || mk no)"
     printf '  %s      ' "$(encrypted "$ts" && mk ok || mk no)"
     printf '  %s      ' "$(committed "hosts/$node.nix" && mk ok || mk no)"
@@ -810,10 +791,11 @@ cmd_guide() {
   Console/USB fallback (no network install):
     1. Write the NixOS 25.05 minimal ISO to USB; boot $node; 'sudo -i'.
     2. lsblk  — confirm disks vs hosts/disko-$node.nix; copy the repo to /root/garage-fleet.
-       cp the host key to /root and: install -d -m700 /mnt/etc/ssh (after disko).
     3. nix run .#disko -- --mode destroy,format,mount --flake .#$node --yes-wipe-all-disks
        (type the ZFS passphrase at the prompt — keylocation=prompt by default)
-    4. seed key: cp .../ssh_host_ed25519_key{,.pub} /mnt/etc/ssh/ ; chmod 600/644
+    4. seed the node age key (the ONLY required seed — NOT the SSH host key, sshd
+       self-generates that): install -d -m700 /mnt/var/lib/sops-nix
+       install -m400 private-keys/$node-age.txt /mnt/var/lib/sops-nix/key.txt
        nixos-install --flake .#$node --no-root-passwd ; reboot
     5. first boot: tailscale status -> set fleet.tailscaleIp ; nixos-rebuild switch --flake .#$node
        sudo zfs load-key -a && sudo zfs mount -a && sudo systemctl start garage

@@ -26,9 +26,9 @@
 #
 # BOOT ORDERING (why root MUST live under the TPM gate, not the manual one):
 #   TPM->LUKS unlock (initrd) -> import wpool -> mount wpool/root as / ->
-#   switch_root -> stage-2 activation. The node's SSH host key
-#   (/etc/ssh/ssh_host_ed25519_key) lives on wpool/root, and modules/sops.nix
-#   derives this node's age identity from it (ssh-to-age). sops-nix MUST decrypt
+#   switch_root -> stage-2 activation. The node's DEDICATED age key
+#   (/var/lib/sops-nix/key.txt, modules/sops.nix age.keyFile) lives on wpool/root,
+#   and sops-nix reads it directly. sops-nix MUST decrypt
 #   tailscale-authkey + root_password_hash AT ACTIVATION — so wpool has to be
 #   unlocked+mounted before stage 2. Putting root under TPM-auto makes that
 #   automatic and the node rejoins the tailnet with NO operator present. Only THEN
