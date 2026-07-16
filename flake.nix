@@ -69,6 +69,21 @@
       lib = nixpkgs.lib;
       pkgs = nixpkgs.legacyPackages.${system};
 
+      # ⚠️ Rosetta-on-Apple-Silicon (this repo's devcontainer is x86_64 EMULATED on
+      # an Apple-Silicon Mac — /proc/cpuinfo model name "VirtualApple") MIS-TRANSLATES
+      # Go's hand-written asm ChaCha20-Poly1305. A stock sops/age here silently
+      # produces CORRUPT age ciphertext: self-consistent on the workstation (it
+      # decrypts its own output), but REAL x86 nodes cannot decrypt it — sops-nix
+      # activation fails "0 successful groups required, got 0" and every secret-fed
+      # service (garage, tailscale) starves. X25519 and AES-GCM survive Rosetta;
+      # only the ChaCha20-Poly1305 asm is wrong. The `purego` build tag drops that
+      # asm for the generic Go path, which Rosetta translates correctly (verified
+      # against RFC 8439 + node-A's sops-install-secrets). ALL encrypt-side sops/age
+      # MUST be built this way. See memory node-a-cpu-aead-miscompute.
+      withPurego = p: p.overrideAttrs (o: { GOFLAGS = (o.GOFLAGS or [ ]) ++ [ "-tags=purego" ]; });
+      sopsPurego = withPurego pkgs.sops;
+      agePurego = withPurego pkgs.age;
+
       # Modules every host shares. Per-host disko + hardware are added in
       # hosts/*.nix. Modules here self-gate on `fleet.role` (garage.nix branches
       # storage/gateway; zfs-sanoid.nix is storage-only) rather than being
@@ -164,6 +179,10 @@
         # From OUR pinned nixpkgs. `nix run nixpkgs#ssh-to-age` would instead hit
         # the flake REGISTRY (nixos-unstable), floating independently of this lock.
         ssh-to-age = pkgs.ssh-to-age;
+        # purego builds (see withPurego above) so `nix run .#sops`/`.#age` from
+        # scripts/fleet never emit Rosetta-corrupted ciphertext.
+        sops = sopsPurego;
+        age = agePurego;
       };
 
       # Operator toolchain for `scripts/fleet`, pinned by flake.lock so every
@@ -173,8 +192,8 @@
       # `deploy`/`install`.
       devShells.${system}.default = pkgs.mkShell {
         packages = [
-          pkgs.sops
-          pkgs.age
+          sopsPurego # NOT pkgs.sops — Rosetta corrupts asm ChaCha20-Poly1305 (withPurego above)
+          agePurego # NOT pkgs.age — same reason
           pkgs.ssh-to-age
           pkgs.openssl
           pkgs.openssh
