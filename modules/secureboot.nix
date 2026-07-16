@@ -28,7 +28,7 @@
 # ON-BOX ENROLLMENT RUNBOOK (run ONCE, at the console, after the first install)
 # ─────────────────────────────────────────────────────────────────────────────
 # STAGED because lanzaboote's activation hook signs every UKI with keys under
-# /etc/secureboot that do NOT exist until step 3. `fleet.secureBoot` (base.nix)
+# /var/lib/sbctl that do NOT exist until step 3. `fleet.secureBoot` (base.nix)
 # stays FALSE through the install AND the first deploy so those run under
 # systemd-boot; you flip it true only once the keys exist. Get the ORDER right —
 # each step's precondition is the previous step's output, and two orderings are
@@ -47,7 +47,7 @@
 #     a deploy-rs rollback baseline.
 #
 #  3. GENERATE this machine's Secure Boot key hierarchy (PK/KEK/db):
-#         sudo sbctl create-keys          # writes /etc/secureboot (== pkiBundle)
+#         sudo sbctl create-keys          # writes /var/lib/sbctl (== pkiBundle)
 #
 #  4. ⚠ SIGN THE UKIs BEFORE enabling Secure Boot. Flip fleet.secureBoot = true in
 #     hosts/node-a.nix, commit, and `fleet deploy node-a`. This activates
@@ -127,9 +127,10 @@ in
 
   boot.lanzaboote = lib.mkIf sb {
     enable = true;
-    # PKI from `sbctl create-keys` (runbook §3). sbctl in this nixpkgs defaults
-    # DatabasePath=/etc/secureboot; lanzaboote reads ${pkiBundle}/keys/db/db.{pem,key}.
-    pkiBundle = "/etc/secureboot";
+    # PKI from `sbctl create-keys` (runbook §3). sbctl 0.17 in this nixpkgs stores
+    # keys under /var/lib/sbctl (the /etc/secureboot default was dropped in sbctl
+    # 0.14); lanzaboote reads ${pkiBundle}/keys/db/db.{pem,key}.
+    pkiBundle = "/var/lib/sbctl";
     # Enroll BY HAND (runbook §5) to keep Microsoft's UEFI CA and control the
     # firmware trip. enrollKeys=true would auto-run a bricking-risk enroll on deploy.
     enrollKeys = false;

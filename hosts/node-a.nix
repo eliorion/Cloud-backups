@@ -78,6 +78,12 @@
     # TODO). The wpool is TPM2/LUKS-unlocked in initrd, independent of this toggle.
     zfsAutoUnlock = false;
 
+    # Secure Boot (lanzaboote signed UKIs). true ONLY after `sbctl create-keys` ran
+    # on the box (modules/secureboot.nix runbook §3): this deploy signs the UKIs and
+    # drops systemd-boot; then enroll keys + enable SB in firmware + seal the TPM at
+    # the console (§5-8). Flipping true before the keys exist = unbootable box.
+    secureBoot = true;
+
     # TODO operator: node-A's tailscale0 overlay IP — set AFTER first join (doc 13).
     tailscaleIp = "100.122.58.119";
 
