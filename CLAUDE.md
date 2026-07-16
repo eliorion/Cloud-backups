@@ -27,21 +27,30 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
   (`new`/`install`/`deploy`/`rollback`/`status`/`secrets`/`config`); replaced the
   former `bootstrap-node` + `deploy-node`. `private-keys/` (gitignored) holds the
   fleet age key + per-node SSH host keys; `.fleet/` (gitignored) holds deploy markers.
-- `flake.nix` — inputs; a `hosts` attrset DERIVES `nixosConfigurations` (+ a per-node
-  `-install` variant each) and the `deploy-rs` node map. `node-d` is commented out of
-  `hosts` until its hardware-config is wired (else `nix flake check` fails)
-- `modules/` — `base.nix` (ssh/nftables/users/nix), `sops.nix` (sops-nix wiring),
-  `garage.nix` (`services.garage` + garage.toml, tailnet listeners),
-  `zfs-sanoid.nix` (ZFS + sanoid RO snapshot moat + autoScrub), `tailscale.nix`,
-  `workstation.nix` (node-A ONLY: ROOT-docker devcontainer host for DevPod — `dev`
-  user in the `docker` group, ARC cap, docker data-root on `wpool/docker`.
-  ⚠️ The docker group is root-equivalent, so node-A's ZFS moat is **deliberately
-  forfeited** — B and C hold the real moat and must never take this role)
-- `hosts/` — `node-a/-b/-c/-d.nix`; `disko-node-a.nix` (A: unencrypted NVMe wpool +
-  encrypted HDD dpool), `disko-node-b.nix` (B: encrypted npool + dpool),
-  `disko-storage.nix` (C: single encrypted pool), `disko-gateway.nix` (boot+root
-  only, greenfield D rebuild). Encrypted datasets use `keylocation=prompt` at
-  runtime, `file://${fleet.zfsInstallKeyfile}` only under the `-install` variant.
+- `flake.nix` — inputs (incl. `lanzaboote` v0.4.2 for node-A Secure Boot);
+  `specialArgs` passes `inputs` so `secureboot.nix` can import the lanzaboote module.
+  A `hosts` attrset DERIVES `nixosConfigurations` (+ a per-node `-install` variant each)
+  and the `deploy-rs` node map. `node-d` is commented out of `hosts` until its
+  hardware-config is wired (else `nix flake check` fails)
+- `modules/` — `base.nix` (ssh/nftables/`sysadmin`+root users/nix; `fleet.*` options),
+  `sops.nix` (sops-nix wiring), `garage.nix` (`services.garage` + garage.toml, tailnet
+  listeners), `zfs-sanoid.nix` (ZFS + sanoid RO snapshot moat + autoScrub),
+  `tailscale.nix`, `secureboot.nix` (node-A ONLY: lanzaboote signed UKIs + systemd
+  stage-1 initrd + TPM2 LUKS unlock + the on-box enrollment runbook; gated on
+  `fleet.secureBoot`), `workstation.nix` (node-A ONLY: ROOT-docker devcontainer host
+  for DevPod — `sysadmin` in the `docker` group, ARC cap, docker data-root on
+  `wpool/docker`. ⚠️ The docker group is root-equivalent, so node-A's ZFS moat is
+  **deliberately forfeited** — B and C hold the real moat and must never take this role)
+- `hosts/` — `node-a/-b/-c/-d.nix`; `disko-node-a.nix` (A: **two trust domains** —
+  NVMe = ESP + swap + LUKS2 `cryptwork` (TPM2/PCR-7 auto-unlock) → ZFS-root `wpool`
+  {root, sysadmin home, docker}; encrypted HDD `dpool` = ALL of Garage,
+  prompt-unlock over the mesh. Root is a `wpool` dataset, not a fixed partition),
+  `disko-node-b.nix` (B: **unencrypted** ext4 root + encrypted npool + dpool),
+  `disko-storage.nix` (C: unencrypted root + single encrypted pool), `disko-gateway.nix`
+  (boot+root only, greenfield D rebuild). ZFS-native encrypted datasets use
+  `keylocation=prompt` at runtime, `file://${fleet.zfsInstallKeyfile}` only under the
+  `-install` variant; node-A's LUKS root additionally reads `fleet.luksInstallKeyfile`
+  at install (its own passphrase, node-A only).
 - `secrets/` — `gen-secrets.sh`, `common.enc.yaml.example`,
   `node.enc.yaml.example`
 - `.sops.yaml` — **FLEET** age recipients (separate trust domain from prod)
@@ -55,8 +64,10 @@ already in production** — reconfigure it **additively** (do not import
 
 - **Use `scripts/fleet`** for routine work: `fleet new <node>` (secrets + scaffold,
   idempotent, `--force` regens), `fleet install <node> root@host` (remote
-  nixos-anywhere + transient tmpfs ZFS-passphrase feed → restores prompt-unlock),
-  `fleet deploy <node>` (deploy-rs), `fleet config tailnet <name>`, `fleet secrets`,
+  nixos-anywhere + transient tmpfs passphrase feed → restores prompt-unlock; node-A
+  prompts for TWO passphrases — see below), `fleet deploy <node>` (deploy-rs),
+  `fleet finalize <node> root@host` (retry the post-install dpool unlock),
+  `fleet config tailnet <name>` (slug only — `.ts.net` is appended), `fleet secrets`,
   `fleet status`. `new`/`secrets` need sops+age (no nix); `install`/`deploy` need nix.
 - **deploy-rs, not Flux** (`fleet deploy <node>` wraps it): `nix run .#deploy-rs -- .#node-a`. Magic
   rollback auto-reverts a bad firewall/tailscaled change in ~30s, but only once a
@@ -101,12 +112,31 @@ already in production** — reconfigure it **additively** (do not import
   Edit with `sops edit` — `sops decrypt > file.yaml` leaves plaintext in the tree
   (`.gitignore` denies `secrets/*.yaml`, but do not rely on it).
 - **Never put `zfs-passphrase` in ANY sops file.** The node's age key is derived
-  from its SSH host key on the UNENCRYPTED root, and `<node>.enc.yaml` ships to the
-  node — so a stored passphrase means a stolen box unlocks its own backups, while
-  you still type it at every reboot (worst of both). Keep it OFFLINE (password
-  manager + a second physical copy); typed at `fleet install` and each unlock.
-  `keylocation=prompt` has **no recovery path**. Same for per-node root passwords:
-  only the `$6$` hash goes in sops, the plaintext lives in the password manager.
+  from its SSH host key on the root (unencrypted ext4 on B/C; on node-A the root is
+  LUKS/TPM but is auto-unlocked at runtime, so a powered-on stolen box still exposes
+  it), and `<node>.enc.yaml` ships to the node — so a stored passphrase means a
+  stolen box unlocks its own backups, while you still type it at every reboot (worst
+  of both). Keep it OFFLINE (password manager + a second physical copy); typed at
+  `fleet install` and each unlock. `keylocation=prompt` has **no recovery path**.
+  Same for per-node root passwords: only the `$6$` hash goes in sops, the plaintext
+  lives in the password manager.
+- **node-A boot model (LUKS/TPM/Secure Boot) — node-A ONLY.** Two trust domains:
+  the NVMe (root + sysadmin home + docker) is a LUKS2 `cryptwork` container unsealed
+  UNATTENDED in initrd by a TPM2 keyslot bound to PCR 7 (`modules/secureboot.nix`),
+  so the box boots + rejoins the tailnet with no operator; the HDD `dpool` (all of
+  Garage) is the MANUAL gate, unlocked over the mesh. Secure Boot (lanzaboote signed
+  UKIs) is STAGED behind `fleet.secureBoot` (default **false** — install and the
+  first deploy MUST use systemd-boot because lanzaboote signs against keys that only
+  exist after the on-box `sbctl create-keys`; flip true and deploy only once the keys
+  exist; then enroll + enable Secure Boot + `systemd-cryptenroll` the TPM — order is
+  load-bearing, see the secureboot.nix runbook). **node-A therefore has TWO install
+  passphrases** (both prompted by `fleet install`, both → password manager): the
+  `dpool` ZFS passphrase (manual gate, typed each unlock) AND the `cryptwork` LUKS
+  recovery passphrase (keyslot-0, the only way back when a firmware/kernel update
+  rotates PCR 7). **node-B/-C have ONE** — their root is unencrypted ext4 (no LUKS
+  domain), so the only human-held secret is the ZFS data passphrase. Passphrase count
+  = number of encryption domains needing a human-held secret. Enrollment needs a
+  PHYSICAL firmware trip (setup mode + supervisor password); can't be done over SSH.
 - ⚠️ **The fleet age key (`private-keys/garage-fleet.txt`) must NEVER land on
   node-A.** It decrypts EVERY node's secrets. node-A is the DevPod devcontainer
   host and runs arbitrary third-party code as effective root (`docker` group,
@@ -130,7 +160,7 @@ The devcontainer ships nix (single-user, no daemon, flakes enabled — see
 ```bash
 nix develop         # operator toolchain: sops/age/ssh-to-age/openssl/openssh/git
                     # + deploy-rs, all pinned by flake.lock (flake.nix devShells)
-nix flake lock      # first time only: resolves nixpkgs/disko/sops-nix/deploy-rs
+nix flake lock      # resolves nixpkgs/disko/sops-nix/deploy-rs/nixos-anywhere/lanzaboote
 nix flake check     # evaluates all nixosConfigurations + deploy-rs schema checks
 ```
 

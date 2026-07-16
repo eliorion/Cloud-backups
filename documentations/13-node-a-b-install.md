@@ -1,4 +1,4 @@
-# 13 — node-A + node-B install runbook (USB, dual-disk, prompt-unlock)
+# 13 — node-A + node-B install runbook (dual-disk; node-A LUKS/TPM root, node-B prompt-unlock)
 
 The single, ordered, copy-paste runbook for installing the **first two** fleet
 nodes from bare metal to a running Garage cluster:
@@ -9,13 +9,28 @@ nodes from bare metal to a running Garage cluster:
   Detailed mechanics already in **doc 12**; here node-B is installed as the node
   that **joins node-A's cluster** (layout v2), not as a standalone single node.
 
-**Chosen design (locked):** boot each box from a NixOS live **USB** → `disko`
-formats **two disks** with **prompt-unlock** ZFS encryption → `nixos-install` the
-flake. node-B = NVMe `npool` (encrypted Garage SSD) + HDD `dpool`. **node-A
-differs** (Phase 1): it is ALSO a dev workstation (`modules/workstation.nix`), so
-its NVMe is the **unencrypted `wpool`** dev pool and **all** of Garage lives on the
-encrypted HDD `dpool` — only `dpool` is prompt-unlocked, and the box still boots
-unattended. This **supersedes** the single-disk auto-unlock skeleton
+**Chosen design (locked):** each box formats **two disks** and `nixos-install`s the
+flake — the preferred path is **remote** (`fleet install`, nixos-anywhere), with the
+live-USB flow below as the fallback.
+
+- **node-B** = NVMe `npool` (encrypted Garage SSD) + HDD `dpool`, both
+  **prompt-unlock** ZFS-native; root is **unencrypted ext4** so it boots unattended,
+  then you unlock the data pools over the mesh. **ONE** human-held passphrase (the
+  ZFS data).
+- **node-A differs** — it is ALSO a dev workstation (`modules/workstation.nix`) *and*
+  its root is encrypted. Two trust domains on one box:
+  - **TPM-AUTO** (NVMe): ESP + swap + a LUKS2 `cryptwork` container (unsealed in
+    initrd by a TPM2 keyslot bound to **PCR 7**) → ZFS-root `wpool` = `{root(/),
+    sysadmin home, docker}`. After the one-time TPM enrollment, reboots unlock root
+    **unattended** (no console, no network) — so sshd + tailscale come up on their
+    own. Secure Boot via **lanzaboote** signed UKIs (`modules/secureboot.nix`) locks
+    the boot path so a thief can't edit the kernel cmdline to a root shell.
+  - **MANUAL GATE** (HDD `dpool`, ZFS-native, `keylocation=prompt`): **all** of
+    Garage. Ciphertext until you `zfs load-key dpool/garage` over the mesh — the only
+    manual step after a bare reboot.
+  So node-A has **TWO** human-held secrets (see [Why node-A has 2 passphrases](#why-node-a-has-2-passphrases-and-node-bc-have-1)); node-B/C have one.
+
+This **supersedes** the single-disk auto-unlock skeleton
 (`hosts/disko-storage.nix`, which now applies only to node-C until C is
 converted) for nodes A and B.
 
@@ -43,7 +58,7 @@ or use subcommands:
 | Command | Does (automated) | You still do |
 |---|---|---|
 | `new <node>` | fleet age key; `.sops.yaml` recipient; `common.enc.yaml` (rpc/admin/metrics, **no** zfs-passphrase); per-node SSH host key → `private-keys/` → `ssh-to-age` recipient → `.sops.yaml`; node authkey; `sops updatekeys`. For a **brand-new** node also scaffolds `hosts/*.nix` + disko + the `flake.nix` entry. Re-running SKIPS what exists | mint the `tag:garage` auth key + set the Tailscale ACL; copy the fleet age key to break-glass; fill the scaffolded `hostId` / device paths / capacities |
-| `install <node> root@host` | REMOTE `nixos-anywhere`: feeds the ZFS passphrase to the installer's RAM (`--disk-encryption-keys`), seeds the host key (`--extra-files`), installs `.#<node>-install`, then restores `keylocation=prompt` over ssh | confirm `lsblk` device paths; type the passphrase; apply the Garage layout once (`fleet guide`) |
+| `install <node> root@host` | REMOTE `nixos-anywhere`: feeds the encryption passphrase(s) to the installer's RAM (`--disk-encryption-keys`), seeds the host key (`--extra-files`), installs `.#<node>-install`, then restores `keylocation=prompt` over ssh. **node-A feeds TWO** pairs (dpool ZFS + cryptwork LUKS); the pre-wipe guard confirms the seeded host key matches the sops recipient | confirm `lsblk` device paths; type the passphrase(s); **node-A**: be at the console for the first LUKS prompt, then do the Secure-Boot/TPM enrollment (`modules/secureboot.nix`); apply the Garage layout once (`fleet guide`) |
 | `deploy <node>` | `deploy-rs` push with **magic-rollback** (auto-reverts a change that breaks reachability). First push warns: no rollback baseline yet | keep a console reachable for that **first** push |
 | `secrets` | list / `sops` edit / **verify-all-encrypted + git-stage** / `updatekeys` | `git commit && git push` the encrypted files |
 | `config tailnet <name>` | writes the MagicDNS tailnet into `flake.nix` (deploy targetHosts) | — |
@@ -67,7 +82,7 @@ the docs finally agree. Already committed/staged for you:
 | Fleet-wide module options `fleet.zfsAutoUnlock / dataDirs / advertiseRoutes / sanoidDatasets` | `modules/base.nix`, `garage.nix`, `tailscale.nix`, `zfs-sanoid.nix` |
 | `zfs-passphrase` sops secret gated on `zfsAutoUnlock` (not role) | `modules/sops.nix` |
 | Multi-disk `data_dir` + `ConditionPathIsMountPoint` start-gate | `modules/garage.nix` |
-| node-A dual-ROLE host: onsite Garage (HDD `dpool`) **+** dev workstation (NVMe `wpool`, rootless podman) | `hosts/node-a.nix`, `disko-node-a.nix`, `node-a-hardware.nix`, `modules/workstation.nix` |
+| node-A dual-ROLE host: onsite Garage (HDD `dpool`, prompt-unlock) **+** dev workstation (NVMe LUKS/TPM `wpool`, ROOT docker) + Secure Boot | `hosts/node-a.nix`, `disko-node-a.nix`, `node-a-hardware.nix`, `modules/workstation.nix`, `modules/secureboot.nix` |
 | node-B dual-disk prompt-unlock host + disko + hardware (per doc 12) | `hosts/node-b.nix`, `disko-node-b.nix`, `node-b-hardware.nix` |
 
 **Validated on real nix** (this is more than docs 11/12 could check):
@@ -80,11 +95,12 @@ the docs finally agree. Already committed/staged for you:
   `rpc_secret / admin_token / metrics_token / tailscale-authkey` are present.
 - `garage` waits for `ConditionPathIsMountPoint = [meta, data-ssd, data-hdd]`.
 
-> ⚠️ **node-A was reworked AFTER this validation** (Phase 1 dev-workstation): its
-> NVMe is now the **unencrypted `wpool`** dev pool, Garage runs a **single
-> `data_dir`** on the HDD (`data-hdd`), and `ConditionPathIsMountPoint = [meta,
-> data-hdd]`. **Re-run `nix flake check` for node-A.** The multi-disk `data_dir`
-> facts above still describe **node-B**.
+> ⚠️ **node-A was reworked TWICE since this validation:** (1) dev-workstation with
+> Garage on a **single `data_dir`** on the HDD (`ConditionPathIsMountPoint = [meta,
+> data-hdd]`); (2) the **LUKS/TPM/lanzaboote** two-trust-domain rework — NVMe is now
+> ESP + swap + LUKS `cryptwork` → ZFS-root `wpool` {root, sysadmin home, docker}, all
+> Garage on the encrypted HDD `dpool`. **`nix flake check` passes for the current
+> node-A** (verified). The multi-disk `data_dir` facts above still describe **node-B**.
 
 **⚠️ Two things STILL block a full build until you do them (Phase 0):**
 
@@ -127,18 +143,22 @@ nix --version                      # flakes-enabled nix (2.x)
 
 Security invariants (from doc 09/12, do not break):
 
-- ZFS passphrase **never** stored on the box **or in any sops file** — typed at
-  format, re-typed at each unlock. Keep it offline (password manager + a second
-  physical copy). `<node>.enc.yaml` SHIPS to the node and the node can decrypt it
-  (its age key comes from its SSH host key on the unencrypted root), so a stored
-  passphrase = a stolen box unlocks its own backups while you still type it every
-  reboot. `keylocation=prompt` has **no recovery path** — lose it, lose the pool.
+- **dpool ZFS passphrase** (the MANUAL gate) **never** stored on the box **or in any
+  sops file** — typed at format, re-typed at each unlock. Keep it offline (password
+  manager + a second physical copy). `<node>.enc.yaml` SHIPS to the node and the node
+  can decrypt it (its age key comes from its SSH host key — on the **unencrypted**
+  root on B/C, on node-A's **TPM-unlocked** root), so a stored dpool passphrase = a
+  stolen box unlocks its own backups. `keylocation=prompt` has **no recovery path** —
+  lose it, lose the pool.
+- **node-A's LUKS passphrase** (cryptwork keyslot-0, the TPM **recovery** secret) is
+  ALSO offline-only, and a **DIFFERENT** secret from the dpool one — see
+  [Why node-A has 2 passphrases](#why-node-a-has-2-passphrases-and-node-bc-have-1).
 - **One passphrase PER NODE**, never one shared across the fleet. A shared value in
   `common.enc.yaml` (encrypted to every node) means compromising node-A — which
   runs arbitrary devcontainer code as effective root — yields node-B's and
   node-C's too.
 - ⚠️ **The fleet age key never lands on node-A.** `private-keys/garage-fleet.txt`
-  decrypts EVERY node's secrets. node-A is the DevPod host with `dev` in the
+  decrypts EVERY node's secrets. node-A is the DevPod host with `sysadmin` in the
   `docker` group (root-equivalent), so copying the key there to run `fleet` locally
   hands the whole fleet to anything that escapes a container. Run `fleet` from the
   workstation devcontainer; node-A is for dev work only. Break-glass copy goes in
@@ -149,35 +169,33 @@ Security invariants (from doc 09/12, do not break):
 - SSH host **private** key reaches the box by **direct copy** to `/mnt/etc/ssh`,
   **never** through the Nix store.
 - The `garage` user gets **zero** `zfs allow` (the snapshot moat depends on it).
-  The `dev` workstation user (node-A) gets **zero** `zfs allow` too.
+  ⚠️ On node-A the `sysadmin` workstation user IS in the `docker` group
+  (root-equivalent) — a deliberate moat trade (`modules/workstation.nix`): node-A's
+  moat is advisory, the real moat lives on B/C. It still holds no direct `zfs allow`.
 - Fleet secrets are a **separate trust domain** — never reuse the prod cluster's
   `age137z0k…` / `age1heestk…` keys.
 - Every Garage listener binds the **`tailscale0` overlay IP only**, never `0.0.0.0`.
 
-## 0.2 Fill the SSH keys (`modules/base.nix`)
+## 0.2 SSH keys (`modules/base.nix`)
 
-Paste your workstation SSH **public** key into both lists (replace the commented
-placeholders). `ops` = break-glass admin; `root` = deploy-rs / nixos-anywhere.
-
-```nix
-  users.users.ops.openssh.authorizedKeys.keys = [
-    "ssh-ed25519 AAAA…YOURKEY operator@workstation"
-  ];
-  users.users.root.openssh.authorizedKeys.keys = [
-    "ssh-ed25519 AAAA…YOURKEY operator@workstation"
-  ];
-```
-
-**node-A only — DevPod login.** node-A also runs the dev workstation
-(`modules/workstation.nix`). Paste your **Mac's** SSH public key into the `dev`
-user there — DevPod connects as `dev`. Leave it empty on the other nodes.
+`modules/base.nix` defines **one** human operator user, `sysadmin` (isNormalUser,
+`wheel` → sudo, uid 2000), plus **key-only** `root` (for deploy-rs / nixos-anywhere).
+Both carry the operator's SSH **public** key — confirm it is yours:
 
 ```nix
-  # modules/workstation.nix
-  users.users.dev.openssh.authorizedKeys.keys = [
-    "ssh-ed25519 AAAA…YOURMACKEY you@mac"
-  ];
+  users.users.sysadmin = {
+    isNormalUser = true;
+    extraGroups = [ "wheel" ];                 # + "docker" on node-A (workstation.nix)
+    openssh.authorizedKeys.keys = [ "ssh-ed25519 AAAA…YOURKEY you@mac" ];
+  };
+  users.users.root.openssh.authorizedKeys.keys = [ "ssh-ed25519 AAAA…YOURKEY you@mac" ];
 ```
+
+**node-A DevPod login** = the same `sysadmin` user. `modules/workstation.nix` adds it
+to the `docker` group (node-A only) so DevPod reaches the **root** docker daemon's
+`/var/run/docker.sock` — no separate `dev` user, no `DOCKER_HOST` override. (The
+docker group is root-equivalent: a deliberate moat trade documented in
+`workstation.nix`.)
 
 ## 0.3 Mint fleet secrets (prompt-unlock variant)
 
@@ -279,8 +297,8 @@ is unrecoverable from a lost node fleet (doc 09 §8).
 |---|---|
 | `hosts/node-a.nix` | `networking.hostId` (unique 8-hex, `head -c4 /dev/urandom \| od -A none -t x4`); `dataDirs` capacity (HDD only now); `tailscaleIp` is set **after** first join (§A.5) |
 | `hosts/node-b.nix` | same; plus `advertiseRoutes` (the LAN CIDR this proxy serves) |
-| `hosts/disko-node-a.nix`, `disko-node-b.nix` | NVMe/HDD `device =` paths — **confirm with `lsblk` on the live USB** before formatting. node-A: NVMe → `wpool` (dev), HDD → `dpool` (Garage) |
-| `modules/workstation.nix` | node-A `dev` user SSH key (your Mac, §0.2); ARC cap if you want ≠4 GiB |
+| `hosts/disko-node-a.nix`, `disko-node-b.nix` | NVMe/HDD `device =` paths — **confirm with `lsblk` on the live USB** before formatting. node-A: NVMe → ESP+swap+LUKS `cryptwork`→`wpool` (OS/dev), HDD → `dpool` (Garage) |
+| `modules/base.nix` / `modules/workstation.nix` | `sysadmin` SSH key = your Mac (§0.2, in base.nix); ARC cap in workstation.nix if you want ≠4 GiB; `fleet.secureBoot` stays `false` until §A.5b |
 | `hosts/node-a-hardware.nix` | **defaults to the M715q module** — regenerate on the box if node-A is different hardware (see the file header) |
 
 ## 0.8 Lock + sanity-check the flake
@@ -318,6 +336,37 @@ locations; both installer + payload USBs ready.
 
 ---
 
+## Why node-A has 2 passphrases and node-B/C have 1
+
+The count of human-held secrets = the count of encryption domains that need one.
+
+| | node-B / node-C | node-A |
+|---|---|---|
+| **root fs** | **unencrypted** ext4 → boots unattended, no secret | **LUKS2 (`cryptwork`)**, TPM2-auto → a domain that needs a **recovery** secret |
+| **Garage data** | ZFS-native `keylocation=prompt` → 1 secret | ZFS-native `keylocation=prompt` → 1 secret |
+| **human-held secrets** | **1** (ZFS data) | **2** (LUKS recovery + ZFS data) |
+
+- **node-B/C** encrypt only their **data** pools. Their root is plain ext4 (so they
+  boot unattended and you unlock data over the mesh), and the ZFS data passphrase is
+  the single secret. Encrypting root wasn't chosen for them: they're headless storage
+  appliances, and a stolen box's *data* already stays ciphertext behind the ZFS gate.
+
+- **node-A** also encrypts its **root** — because it's your daily-driver workstation
+  and its root/home/docker hold dev source. That adds a *second* encryption domain
+  (LUKS), and LUKS needs a passphrase in keyslot 0. The TPM normally supplies the key
+  automatically (so day-to-day you type **nothing** for root), but that keyslot-0
+  passphrase is the **recovery** secret for when a firmware/kernel update rotates
+  PCR 7 and the TPM refuses.
+
+So node-A doesn't have "two routine unlocks." Routine node-A is still **one** manual
+step — `zfs load-key dpool/garage` over the mesh, same as B/C. The LUKS passphrase is
+a rarely-used **recovery** key, and the install prompts for both only because both
+keyslots must be seeded at format time. They are **deliberately different secrets**:
+the LUKS one guards a domain (root, at-rest) the TPM automates; the ZFS one is the
+routine manual gate. Both live offline in the break-glass vault.
+
+---
+
 ## Phase A — install node-A (onsite) → single-node cluster, layout v1
 
 `disko` **destroys both of node-A's disks**. node-A holds no backups yet, so this
@@ -331,7 +380,7 @@ menu (Lenovo = **F12**) → the installer USB. Then:
 ```bash
 sudo -i
 ping -c1 nixos.org                 # DHCP up
-lsblk                              # CONFIRM the NVMe (boot + wpool dev) and HDD (dpool = all Garage)
+lsblk                              # CONFIRM the NVMe (ESP+swap+cryptwork→wpool) and HDD (dpool = all Garage)
 ```
 
 > If device names differ from `hosts/disko-node-a.nix` (`/dev/nvme0n1`,
@@ -347,22 +396,31 @@ export NIX_CONFIG="experimental-features = nix-command flakes"
 cd /root/garage-fleet && { [ -f flake.lock ] || nix flake lock; }
 ```
 
-### A.3 Partition + format (prompts for the passphrase)
+### A.3 Partition + format (prompts for BOTH passphrases)
+
+> Preferred: skip the USB and run `fleet install node-a root@<ip>` from the
+> workstation — it prompts for both passphrases, feeds them via two
+> `--disk-encryption-keys` pairs, and runs the pre-wipe recipient guard. The manual
+> `disko` below is the fallback; the runtime variant has no install keyfiles, so
+> disko prompts interactively for both.
 
 ```bash
 nix run .#disko -- \
   --mode destroy,format,mount --flake .#node-a --yes-wipe-all-disks
 ```
 
-- **DESTROYS** the NVMe + HDD; creates ESP + ext4 root + `wpool` (unencrypted,
-  dev) + `dpool` (encrypted, all Garage).
-- It pauses at **`Enter passphrase:`** **once** — for `dpool/garage` only (`wpool`
-  is unencrypted). This is the *only* copy — write it offline now (two locations).
+- **DESTROYS** the NVMe + HDD; creates ESP (2G) + swap (8G) + LUKS2 `cryptwork` →
+  ZFS-root `wpool` {root, sysadmin home, docker} on the NVMe, and encrypted `dpool`
+  (all Garage) on the HDD.
+- It pauses **TWICE** — two DIFFERENT secrets, both the *only* copy, both offline now:
+  1. **LUKS passphrase** for `cryptwork` (the TPM-auto root domain). Becomes keyslot
+     0 = the **TPM recovery** key.
+  2. **ZFS passphrase** for `dpool/garage` (the manual gate you re-type each unlock).
 
 ```bash
-zfs list                           # wpool/dev, dpool/garage/{meta,data}
+zfs list                           # wpool/{root,home,docker}, dpool/garage/{meta,data}
 ls -la /mnt/srv/garage/            # meta, data-hdd mountpoints
-ls -la /mnt/home/dev               # dev workstation home on wpool
+ls -la /mnt/home/sysadmin          # sysadmin home on wpool
 ```
 
 ### A.4 Inject the SSH host key + install
@@ -382,15 +440,21 @@ umount -R /mnt && zpool export -a
 reboot                             # pull the installer USB during reboot
 ```
 
-### A.5 First boot: join the tailnet, then fix the overlay IP
+### A.5 First boot: console LUKS unlock, join the tailnet, fix the overlay IP
 
-Root is unencrypted → the box boots unattended → sops decrypts (host key present)
-→ tailscale auto-joins with the authkey. The `wpool` dev pool mounts immediately;
-`dpool` imports but stays **locked**.
+⚠️ **This first boot is NOT unattended.** The TPM is not enrolled yet (that is the
+one-time trip in §A.5b), so systemd-cryptsetup falls back to a **console passphrase
+prompt** for `cryptwork`. **Be at the keyboard** and type the **LUKS** passphrase
+(§A.3.1) within ~60 s of the prompt — the initrd ZFS root-import has a short patience
+window; miss it and boot drops to an initrd emergency shell (just reboot and retry).
+
+Once `cryptwork` unlocks, `wpool` imports, `wpool/root` mounts as `/`, and stage-2
+runs: sops decrypts (host key on `wpool/root`) → tailscale auto-joins with the
+authkey. `wpool/{root,home,docker}` are up; `dpool` imports but stays **locked**.
 
 ```bash
 tailscale status                   # note node-A's real 100.x.y.z
-zfs get keystatus dpool/garage     # unavailable (locked) — expected (wpool is unencrypted, already mounted)
+zfs get keystatus dpool/garage     # unavailable (locked) — expected; wpool is TPM-unlocked, already mounted
 systemctl status garage            # inactive (ConditionPathIsMountPoint) — expected
 ```
 
@@ -405,6 +469,33 @@ sudo nixos-rebuild switch --flake /root/garage-fleet#node-a
 ```
 
 Commit that `tailscaleIp` on the workstation branch too (source of truth = box).
+
+### A.5b Enroll Secure Boot + seal the TPM (node-A only, one-time console trip)
+
+Until this is done, **every** node-A boot needs the console LUKS passphrase (§A.5).
+The goal: reboots unlock root **unattended** from the TPM. The full step-by-step
+(with the exact commands + the WHY) lives in **`modules/secureboot.nix`** — follow it
+there. The ORDER is load-bearing and easy to get wrong; the summary:
+
+1. First deploy while still on systemd-boot (`fleet.secureBoot = false`, the default)
+   to get a deploy-rs rollback baseline.
+2. `sudo sbctl create-keys` (writes `/etc/secureboot`).
+3. **Sign the UKIs BEFORE turning Secure Boot on:** flip `fleet.secureBoot = true` in
+   `hosts/node-a.nix`, commit, `fleet deploy node-a` (this activates lanzaboote and
+   signs every UKI), then `sudo sbctl verify`. Enabling SB before this leaves nothing
+   signed to verify → unbootable.
+4. Firmware → Setup Mode → `sudo sbctl enroll-keys --microsoft` → enable Secure Boot →
+   set a **firmware supervisor password**.
+5. **Seal the TPM ONLY NOW,** after SB is on, so PCR 7 reflects the final state:
+   `sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 /dev/disk/by-partlabel/disk-nvme-cryptwork`
+   (authorize with the LUKS passphrase). Sealing before SB is enabled binds PCR 7 to
+   the wrong state and the next boot won't unlock.
+6. Reboot — cryptwork now unlocks unattended. Confirm the LUKS passphrase survived as
+   a recovery keyslot: `sudo cryptsetup luksDump …disk-nvme-cryptwork` shows keyslot 0
+   **and** a `systemd-tpm2` token.
+
+The LUKS passphrase stays your only way back after a firmware/dbx update rotates
+PCR 7 — keep it in the break-glass vault.
 
 ### A.6 Unlock the data pool + start Garage
 
@@ -438,43 +529,49 @@ aws --endpoint-url http://100.x.y.z:3900 --region garage s3 ls
 $GARAGE bucket info smoke
 ```
 
-**Phase A gate:** boots unattended; `dpool` `unavailable` until `load-key` (the
-`wpool` dev pool is unencrypted and already mounted); garage inactive pre-unlock;
-listeners bound to `100.x.y.z` (not `0.0.0.0`) —
-`ss -tlnp | grep -E '3900|3901|3903'`; `/run/secrets/` has rpc/admin/metrics +
-tailscale-authkey and **no** `zfs-passphrase`; `zfs allow dpool/garage` shows the
-`garage` user **nowhere** — and the `dev` user **nowhere** either (the workstation
-must not reach the moat); `data-hdd` used (single `data_dir`); `sanoid.timer`
-active.
+**Phase A gate:** after TPM enrollment (§A.5b) boots unattended (before it, the
+console LUKS passphrase); `dpool` `unavailable` until `load-key` (the `wpool` OS/dev
+pool is TPM-unlocked and already mounted); garage inactive pre-unlock; listeners
+bound to `100.x.y.z` (not `0.0.0.0`) — `ss -tlnp | grep -E '3900|3901|3903'`;
+`/run/secrets/` has rpc/admin/metrics + tailscale-authkey and **no** `zfs-passphrase`;
+`zfs allow dpool/garage` shows the `garage` user **nowhere** (`sysadmin` reaches root
+via docker but holds no direct `zfs allow`); `data-hdd` used (single `data_dir`);
+`sanoid.timer` active.
 
 ### A.9 Verify the dev workstation (node-A dual-role)
 
-node-A also hosts your devcontainers — rootless podman, driven from the Mac via
-DevPod. Independent of Garage: it works the moment the box is up; the encrypted
-`dpool` does **not** need unlocking for dev work.
+node-A also hosts your devcontainers — a **root docker** daemon (zfs storage
+driver, data-root on `wpool/docker`), driven from the Mac via DevPod. Independent of
+Garage: it works the moment `wpool` is up; the encrypted `dpool` does **not** need
+unlocking for dev work.
 
 On node-A:
 
 ```bash
-sudo -u dev podman info | grep -A2 graphDriver    # expect overlay + fuse-overlayfs (NOT vfs)
-sudo -u dev XDG_RUNTIME_DIR=/run/user/2000 systemctl --user status podman.socket   # active (listening)
-zfs allow dpool/garage                            # the dev user must appear NOWHERE
+docker info | grep -A2 'Storage Driver'           # expect: zfs (NOT a vfs fallback)
+id sysadmin                                        # groups include wheel + docker
+zfs allow dpool/garage                             # sysadmin holds no direct zfs allow
 ```
 
-From the **Mac** (after pasting your key into the `dev` user, §0.2):
+From the **Mac** (your key is on the `sysadmin` user, §0.2):
 
 ```bash
-devpod provider add ssh --option HOST=dev@node-a.<tailnet>.ts.net
+devpod provider add ssh --option HOST=sysadmin@node-a.<tailnet>.ts.net
 devpod up <repo> --provider ssh --ide vscode
 ```
 
-`DOCKER_HOST` is forced server-side (sshd `Match User dev` → `SetEnv`), so the
-remote build just works. Rootless limits: no `--privileged`, no docker-in-docker,
-no host ports <1024. ZFS ARC is capped at 4 GiB to leave RAM for containers.
+The docker CLI defaults to `/var/run/docker.sock`, reached via the `docker` group —
+no `DOCKER_HOST` override. Full envelope: `--privileged`, docker-in-docker, host
+ports <1024 all work. ZFS ARC is capped at 4 GiB to leave RAM for containers.
 
-**Phase A (workstation) gate:** `podman info` shows the `overlay` driver;
-`devpod up` builds and the IDE attaches; `dpool` can stay locked and dev still
-works; `zfs allow dpool/garage` lists neither `garage` nor `dev`.
+> ⚠️ **Moat trade:** the `docker` group is root-equivalent, so on node-A a container
+> escape / hostile devcontainer dep can reach root and `zfs destroy dpool/garage@*`.
+> node-A's moat is advisory by design; the real moat is B/C. `sysadmin`'s sshd sets
+> `AllowAgentForwarding no` so a forwarded key can't be reused to reach root on B/C.
+
+**Phase A (workstation) gate:** `docker info` shows the `zfs` driver; `devpod up`
+builds and the IDE attaches; `dpool` can stay locked and dev still works;
+`zfs allow dpool/garage` lists no `garage` user.
 
 ---
 
@@ -590,21 +687,23 @@ Both boxes come back on their own, but Garage stays **down until you unlock**
 (prompt-unlock, by design — a stolen offsite box stays locked):
 
 ```bash
-ssh ops@node-b.<tailnet>.ts.net
+ssh sysadmin@node-b.<tailnet>.ts.net
 sudo zfs load-key -a && sudo zfs mount -a
 sudo systemctl start garage
 ```
 
-On **node-A** the dev workstation (`wpool`, rootless podman) is already up at this
-point — only Garage waits for the `dpool` unlock above.
+On **node-A** the OS + dev workstation (`wpool`: root, home, docker) is already up —
+`wpool` unlocks from the **TPM** in initrd, unattended, so sshd/tailscale/docker come
+back on their own. Only Garage waits for the `dpool` unlock above. (Until the TPM is
+enrolled — §A.5b — node-A's `wpool` needs the **console LUKS passphrase** at each
+boot instead.)
 
-Never store the passphrase on the box (that defeats prompt-unlock). For the
-onsite node-A you *may* opt `dpool` into auto-unlock, but note (post Phase 1) that
-flipping `fleet.zfsAutoUnlock = true` **alone is not enough** — you must also
-switch `dpool/garage` `keylocation` to a `file://…` URL in
-`hosts/disko-node-a.nix` and add a boot load-key unit (doc 12 §9(a)), accepting
-the weaker theft story. node-A's `wpool` (dev) is already unencrypted and always
-auto-mounts.
+Never store the dpool passphrase on the box (that defeats prompt-unlock). For the
+onsite node-A you *may* opt `dpool` into auto-unlock, but flipping
+`fleet.zfsAutoUnlock = true` **alone is not enough** — you must also switch
+`dpool/garage` `keylocation` to a `file://…` URL in `hosts/disko-node-a.nix` and add
+a boot load-key unit (doc 12 §9(a)), accepting the weaker theft story. node-A's
+`wpool` is a separate concern: it is LUKS/TPM and auto-unlocks in initrd regardless.
 
 ## Relation to other docs
 
@@ -634,14 +733,18 @@ prompt-unlock model (so docs 11/12 and the code agree):
   `[ "bpool/garage" ]`); the dataset map is generated from it so dual-disk nodes
   snapshot `npool/garage` + `dpool/garage`. **node-A snapshots only
   `dpool/garage`** — its NVMe `wpool` is the dev pool, not a moat dataset.
-- `hosts/node-a.nix` + `disko-node-a.nix` + `node-a-hardware.nix` — node-A on the
-  prompt-unlock model (onsite, non-proxy), **reworked for the dev-workstation
-  dual-role** (Phase 1): NVMe = unencrypted `wpool` (dev), all Garage on the
-  encrypted HDD `dpool` (single `data_dir`).
-- `modules/workstation.nix` — **new** (Phase 1, node-A only): rootless-podman
-  devcontainer host for DevPod — unprivileged `dev` user (no wheel/docker/
-  zfs-allow), pinned uid 2000, `DOCKER_HOST` + agent-forwarding-off via sshd
-  `Match User dev`, ZFS ARC cap. Co-located with the DR Garage role.
+- `hosts/node-a.nix` + `disko-node-a.nix` + `node-a-hardware.nix` — node-A's
+  **two-trust-domain** rework: NVMe = ESP + swap + LUKS2 `cryptwork` (TPM2/PCR-7
+  auto-unlock) → **ZFS-root** `wpool` {root, sysadmin home, docker}; all Garage on the
+  encrypted HDD `dpool` (prompt-unlock, single `data_dir`). Root is a `wpool` dataset,
+  not a fixed partition.
+- `modules/secureboot.nix` — **new** (node-A only): lanzaboote signed UKIs + systemd
+  stage-1 initrd + TPM2 LUKS unlock, staged on `fleet.secureBoot`, plus the on-box
+  enrollment runbook.
+- `modules/workstation.nix` — **new** (node-A only): **ROOT-docker** devcontainer host
+  for DevPod — `sysadmin` (uid 2000) in the `docker` group (root-equivalent, a
+  deliberate moat trade), docker `zfs` driver on `wpool/docker`, agent-forwarding-off
+  via sshd `Match User sysadmin`, ZFS ARC cap. Co-located with the DR Garage role.
 - `hosts/node-b.nix` + `disko-node-b.nix` + `node-b-hardware.nix` — **new/rewritten**
   per doc 12.
 - `hosts/node-c.nix` / `node-d.nix` — **unchanged**. node-C still imports the
