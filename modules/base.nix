@@ -166,9 +166,12 @@
         KbdInteractiveAuthentication = false;
         PermitRootLogin = "prohibit-password"; # key-only root for deploy-rs
       };
-      # ⚠️ Do NOT regenerate the host key after install — the node's age
-      #    identity is derived from /etc/ssh/ssh_host_ed25519_key (ssh-to-age)
-      #    and sops-nix decryption breaks if it changes (doc 09 §8).
+      # The host key is the node's SSH SERVER identity only. It is NOT the sops
+      # identity — that is a DEDICATED age key at /var/lib/sops-nix/key.txt
+      # (modules/sops.nix age.keyFile) — so it can be regenerated freely. NixOS
+      # generates this ed25519 key on first boot if absent; `fleet install` does
+      # NOT pre-seed it (only the age key is seeded). A reinstall therefore mints a
+      # fresh host key, so clear the stale known_hosts entry (ssh-keygen -R <host>).
       hostKeys = [
         {
           type = "ed25519";

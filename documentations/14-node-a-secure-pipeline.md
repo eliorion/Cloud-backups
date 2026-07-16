@@ -83,8 +83,9 @@ HDD /dev/sda
     extraction is a cold-boot/hardware attack, not a walk-up.
   - **dpool stays ciphertext regardless** — its passphrase is only in your
     head/KeePass, never on the box. So even a thief who *does* reach root gets the
-    SSH host key → the **tailscale authkey** (revoke it) and the **root password
-    hash** (uncrackable) — but **never the backups.** You rotate one authkey.
+    node's age key (`/var/lib/sops-nix/key.txt`) → the **tailscale authkey** (revoke
+    it) and the **root password hash** (uncrackable) — but **never the backups.**
+    You rotate one authkey.
 
 This is why the ZFS passphrase must **never** be stored in sops or on disk (it is
 the one secret whole-box theft cannot yield), and why the LUKS passphrase is a
@@ -160,10 +161,10 @@ The first boot is **at the console**, because the TPM is not enrolled yet:
    to a passphrase prompt. **Be at the keyboard** and type the LUKS passphrase
    **within ~60 s** (the initrd ZFS-root import has a ~60 s patience window).
 2. wpool unlocks → `wpool/root` mounts as `/` → stage-2 activation → sops-nix
-   decrypts (using the host key now on the unlocked root) → the tailscale authkey
-   is present → **node-A joins the mesh on its own.** This chain is why root
-   *must* be in the TPM/LUKS domain and unlocked in initrd: sops needs the host
-   key before activation.
+   decrypts (using the dedicated age key at `/var/lib/sops-nix/key.txt`, now on the
+   unlocked root) → the tailscale authkey is present → **node-A joins the mesh on
+   its own.** This chain is why root *must* be in the TPM/LUKS domain and unlocked
+   in initrd: sops needs its age key before activation.
 3. **Finalize the dpool** (fleet offers this over SSH once sshd is up, or run
    `fleet finalize node-a root@<ip>`): restores `keylocation=prompt`, then
    `zfs load-key dpool/garage && zfs mount -a` (you re-type the **ZFS**
