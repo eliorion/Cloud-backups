@@ -51,9 +51,15 @@ in
         data_dir = if cfg.dataDirs != null then cfg.dataDirs else dataDir;
         db_engine = "lmdb"; # required default for replication_factor >= 2
 
-        # IDENTICAL on every node or the cluster will not form (doc 09 §5).
-        replication_factor = 3;
-        consistency_mode = "consistent"; # read-after-write, quorum 2/2
+        # IDENTICAL on every node or the cluster will not form (doc 09 §5). This is
+        # a SINGLE cluster-wide number, NOT additive per node. Phase 1 = node-A
+        # alone, so 1 (one copy; Garage serves with a single node). To get a copy on
+        # each of A/B/C, raise to 3 on ALL nodes at once AFTER B+C join, redeploy the
+        # fleet, then re-push the DR data — cheap here (re-pushable from prod, pool
+        # ~empty now). rf=3 CANNOT apply with < 3 nodes: the layout needs 3 distinct
+        # nodes to place 3 copies, so it stays 1 until B and C exist.
+        replication_factor = 1;
+        consistency_mode = "consistent"; # rf=1 → quorum 1/1 (at rf=3 → 2/3)
 
         # Guards against non-recoverable LMDB corruption after unclean shutdown
         # (doc 09 §5 / §11).
