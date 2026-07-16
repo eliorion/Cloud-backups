@@ -50,6 +50,9 @@ STATE_DIR="$ROOT/.fleet"
 # Must match flake.nix `installKeyfile` (the tmpfs path nixos-anywhere uploads
 # the ZFS passphrase to, that the *-install disko variants read).
 INSTALL_KEYFILE_REMOTE="/tmp/fleet-zfs.key"
+# Must match hosts/disko-node-a.nix `luksInstallKeyfile` — the tmpfs path the
+# cryptwork LUKS passphrase is uploaded to (LUKS-root nodes only; node-A).
+INSTALL_LUKS_KEYFILE_REMOTE="/tmp/fleet-luks.key"
 
 # Fleet age private key (decrypts sops as the workstation). In-repo copy first
 # (private-keys/, gitignored), then the XDG location, then env override.
@@ -388,6 +391,16 @@ cmd_new() {
   note "Provision it:                   fleet install $node root@<installer-ip>"
 }
 
+# Remote tmpfs path this node's cryptwork LUKS passphrase must be uploaded to, or
+# empty if the node has no LUKS root. Evals fleet.luksInstallKeyfile on the
+# `-install` variant (null → `nix eval --raw` errors → treated as empty). Needs nix.
+node_luks_keyfile() {
+  local node="$1" v
+  v="$( ( cd "$ROOT" && nix eval --raw ".#nixosConfigurations.${node}-install.config.fleet.luksInstallKeyfile" ) 2>/dev/null )" || return 0
+  [[ -n "$v" && "$v" != "null" ]] && printf '%s' "$v"
+  return 0
+}
+
 # ============================================================================= install
 cmd_install() {
   [[ $# -ge 2 ]] || die "usage: fleet install <node> <root@host> [-- <extra nixos-anywhere args>]"
@@ -400,6 +413,15 @@ cmd_install() {
   [[ -f "$hk" ]] || die "no host key for $node — run: fleet new $node"
   encrypted "$COMMON" || die "secrets/common.enc.yaml is not encrypted — run: fleet new $node"
   node_recipient_ready "$node" || die "$node recipient missing in .sops.yaml — run: fleet new $node"
+  # Chicken-and-egg guard (a DESTRUCTIVE-wipe check): the host key about to be
+  # SEEDED (--extra-files) derives this node's age identity (ssh-to-age). If its
+  # recipient is NOT what the secrets were encrypted to, sops-nix fails at first-boot
+  # activation → no tailscale-authkey → the node never joins the mesh → the dpool
+  # `zfs load-key` unlock (only reachable over the mesh) is impossible on freshly
+  # wiped disks. Verify BEFORE wiping.
+  local seeded_recip; seeded_recip="$(ssh_to_age -i "$hk.pub" 2>/dev/null | tr -d '[:space:]' || true)"
+  [[ "$seeded_recip" == age1* ]] || die "cannot derive an age recipient from $hk.pub (ssh-to-age)."
+  grep -q "$seeded_recip" "$SOPS_YAML" || die "the host key to be seeded ($hk) derives recipient $seeded_recip, which is NOT in .sops.yaml — the secrets are encrypted to a DIFFERENT key, so $node could not decrypt them after install (no mesh, no unlock). Re-run 'fleet new $node' or re-encrypt to this key first."
   committed "secrets/common.enc.yaml" || die "commit the encrypted secrets first (fleet secrets). A flake copies only git-tracked files."
   committed "hosts/$node.nix" || warn "hosts/$node.nix is not committed — the flake build will not see uncommitted files."
   flake_has_node "$node" || die "$node is not wired into flake.nix (its hosts entry is missing/commented). For an in-production additive node (e.g. node-d), wire its hardware-config and uncomment it in hosts/$node.nix + flake.nix hosts first."
@@ -410,15 +432,31 @@ cmd_install() {
   note "Confirm device paths there match 'lsblk' on the installer BEFORE proceeding."
   confirm "wipe + install $node on $target?" || { note "aborted."; return; }
 
-  # Prompt the passphrase BEFORE creating any temp file, so a typo aborts cleanly.
-  local flake_attr=".#${node}-install" p1=""
+  # Prompt the passphrase(s) BEFORE creating any temp file, so a typo aborts cleanly.
+  local flake_attr=".#${node}-install" p1="" pl="" luks_remote=""
   if is_storage "$node"; then
     local p2
-    note "The ZFS passphrase is uploaded to the installer's RAM only (tmpfs $INSTALL_KEYFILE_REMOTE),"
-    note "then keylocation is restored to prompt — never written to any disk, here or on the box."
-    read -rsp "ZFS passphrase for $node (hidden): " p1; echo
-    read -rsp "confirm passphrase: " p2; echo
+    note "ZFS (dpool) passphrase — the MANUAL gate you re-type over the mesh each unlock."
+    note "Uploaded to the installer's RAM only (tmpfs $INSTALL_KEYFILE_REMOTE); keylocation"
+    note "is restored to prompt post-boot — never written to any disk, here or on the box."
+    read -rsp "ZFS (dpool) passphrase for $node (hidden): " p1; echo
+    read -rsp "confirm ZFS passphrase: " p2; echo
     [[ -n "$p1" && "$p1" == "$p2" ]] || die "passphrases empty or mismatched"
+
+    # LUKS-root nodes (node-A) need a SECOND, DIFFERENT install passphrase: the
+    # cryptwork keyslot-0 secret = the TPM recovery key. Kept separate from the
+    # dpool passphrase (different domains, different rotation, different exposure).
+    luks_remote="$(node_luks_keyfile "$node")"
+    if [[ -n "$luks_remote" ]]; then
+      local pl2
+      warn "$node has a LUKS/TPM root — this is a SECOND passphrase, DIFFERENT from the ZFS"
+      warn "one above (LUKS keyslot-0 = TPM recovery secret). BOTH go in your password"
+      warn "manager; the LUKS one is the ONLY way back if a firmware update rotates PCR 7."
+      read -rsp "LUKS (root) install passphrase for $node (hidden): " pl; echo
+      read -rsp "confirm LUKS passphrase: " pl2; echo
+      [[ -n "$pl" && "$pl" == "$pl2" ]] || die "LUKS passphrases empty or mismatched"
+      [[ "$pl" == "$p1" ]] && warn "LUKS and ZFS passphrases are IDENTICAL — allowed, but a distinct LUKS passphrase is stronger."
+    fi
   else
     flake_attr=".#${node}"   # gateway has no encrypted pool; no install variant needed
   fi
@@ -429,9 +467,9 @@ cmd_install() {
   # onto the target). Both are cleaned on RETURN; we capture nixos-anywhere's exit
   # status so a failure RETURNS (firing the trap) instead of aborting under set -e
   # and leaking the private host key.
-  local xf kf_src=""
+  local xf kf_src="" kl_src=""
   xf="$(mktemp -d)"
-  trap 'rm -rf "$xf" ${kf_src:+"$kf_src"}' RETURN
+  trap 'rm -rf "$xf" ${kf_src:+"$kf_src"} ${kl_src:+"$kl_src"}' RETURN
   install -d -m700 "$xf/etc/ssh"
   install -m600 "$hk"     "$xf/etc/ssh/ssh_host_ed25519_key"
   install -m644 "$hk.pub" "$xf/etc/ssh/ssh_host_ed25519_key.pub"
@@ -439,6 +477,11 @@ cmd_install() {
   if is_storage "$node"; then
     kf_src="$(mktemp)"; chmod 600 "$kf_src"; printf '%s' "$p1" > "$kf_src"
     dek=(--disk-encryption-keys "$INSTALL_KEYFILE_REMOTE" "$kf_src")
+    # Second pair for the LUKS root (node-A): its own passphrase, its own tmpfs path.
+    if [[ -n "$luks_remote" ]]; then
+      kl_src="$(mktemp)"; chmod 600 "$kl_src"; printf '%s' "$pl" > "$kl_src"
+      dek+=(--disk-encryption-keys "$luks_remote" "$kl_src")
+    fi
   fi
 
   hdr "nixos-anywhere"
@@ -457,7 +500,13 @@ cmd_install() {
   if is_storage "$node"; then
     hdr "post-boot: restore prompt-unlock + bring Garage up"
     note "The install keyfile is gone (tmpfs). Switch the encrypted datasets back to"
-    note "prompt-unlock and unlock them now (you'll re-type the SAME passphrase)."
+    note "prompt-unlock and unlock them now (you'll re-type the SAME ZFS passphrase)."
+    if [[ -n "$luks_remote" ]]; then
+      warn "$node has a LUKS/TPM root and the TPM is NOT enrolled yet, so THIS first boot"
+      warn "STOPS at a console LUKS passphrase prompt. Be at the keyboard: type the LUKS"
+      warn "passphrase within ~60s of the prompt — sshd (and this finalize) only come up"
+      warn "after that. Future reboots go unattended once you enroll the TPM (see 'next')."
+    fi
     # The box is REBOOTING into the installed system; sshd is not listening yet, so
     # finalizing immediately fails with "Connection refused". Wait for it.
     wait_for_ssh "$target" || {
@@ -476,6 +525,12 @@ cmd_install() {
   note "Note $node's tailnet IP ('tailscale status' on the box), set fleet.tailscaleIp,"
   note "set the tailnet ('fleet config tailnet <name>'), commit, then: fleet deploy $node"
   note "Apply the Garage layout ONCE (prev+1) — see: fleet guide $node"
+  if [[ -n "$luks_remote" ]]; then
+    warn "SECURE BOOT + TPM ($node, ONE-TIME console trip) — do the enrollment runbook in"
+    warn "modules/secureboot.nix: sbctl create-keys → flip fleet.secureBoot=true + deploy →"
+    warn "enroll keys + enable Secure Boot in firmware → systemd-cryptenroll the TPM to PCR 7."
+    warn "Until the TPM is sealed, EVERY boot needs the console LUKS passphrase."
+  fi
 }
 
 # Poll until the target's sshd answers. nixos-anywhere reboots the box at the end
