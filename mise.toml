@@ -37,18 +37,14 @@ run = "nix flake lock"
 description = "Evaluate the flake + deploy-rs schema checks"
 run = "nix flake check"
 
-[tasks.host-key]
-description = "Pre-generate node-B's SSH host key + print its age recipient (doc 12 §1.2)"
-run = """
-install -d -m700 node-b-extra/etc/ssh
-ssh-keygen -t ed25519 -N '' -C node-b -f node-b-extra/etc/ssh/ssh_host_ed25519_key
-nix run .#ssh-to-age -- -i node-b-extra/etc/ssh/ssh_host_ed25519_key.pub
-"""
+# Node keys (SSH host key + DEDICATED age key) + recipient + secrets are generated
+# by `scripts/fleet new <node>` — NOT a mise task. The old `host-key` task printed an
+# ssh-to-age recipient, which is no longer the node identity (dedicated age key now).
 
 [tasks.deploy]
-description = "Deploy node-B over the tailnet; node-B builds its OWN x86_64 closure"
+description = "Deploy node-B over the tailnet; node-B builds its OWN x86_64 closure (or: scripts/fleet deploy node-b)"
 run = "nix run .#deploy-rs -- .#node-b --remote-build"
 
 [tasks.lint]
 description = "shellcheck the repo scripts"
-run = "shellcheck scripts/setup secrets/gen-secrets.sh"
+run = "shellcheck scripts/fleet scripts/setup secrets/gen-secrets.sh"

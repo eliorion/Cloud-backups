@@ -8,9 +8,9 @@
 #   fleet                       Interactive TUI menu.
 #   fleet new   <node> [opts]   Scaffold + secrets for a node (idempotent).
 #                               Generates the fleet age key, shared secrets, the
-#                               node's SSH host key (-> private-keys/), its
-#                               ssh-to-age recipient (-> .sops.yaml), its
-#                               Tailscale authkey, and — for a brand-new node —
+#                               node's SSH host key + DEDICATED age key
+#                               (-> private-keys/), its age recipient (-> .sops.yaml),
+#                               its Tailscale authkey, and — for a brand-new node —
 #                               its hosts/*.nix + disko + flake + .sops.yaml rule.
 #                               Re-running SKIPS what already exists; --force regens.
 #   fleet install <node> <root@host>
@@ -31,10 +31,11 @@
 #   fleet guide   <node>        Print the on-box fallback runbook (doc 13).
 #
 # Tool needs:
-#   new / secrets : nix (purego sops/age from the flake), ssh-to-age, openssl,
-#                   ssh-keygen, git. sops/age MUST be the flake's -tags=purego
-#                   builds — a stock/mise binary silently corrupts age ciphertext
-#                   on this Rosetta (Apple-Silicon) workstation (see sops()/age()).
+#   new / secrets : nix (purego sops/age from the flake), openssl, ssh-keygen, git.
+#                   sops/age MUST be the flake's -tags=purego builds — a stock/mise
+#                   binary silently corrupts age ciphertext on this Rosetta
+#                   (Apple-Silicon) workstation (see sops()/age()). Node identity is
+#                   a DEDICATED age key (private-keys/<node>-age.txt), NOT ssh-to-age.
 #   install/deploy/rollback : nix (+ ssh)  — these build/activate the flake
 # Secrets are never echoed. private-keys/ + node-*-extra/ are gitignored and
 # never staged. Only ENCRYPTED secrets/*.enc.yaml are committed.
@@ -94,18 +95,6 @@ die()  { err "$*"; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 need() { have "$1" || die "required tool not found: $1"; }
-
-# ssh-to-age: PATH binary, else mise install, else nix, else fail with a hint.
-ssh_to_age() {
-  if have ssh-to-age; then ssh-to-age "$@"; return; fi
-  local m
-  m="$(ls -1 "$HOME"/.local/share/mise/installs/github-mic92-ssh-to-age/*/ssh-to-age* 2>/dev/null | head -1 || true)"
-  if [[ -n "$m" && -x "$m" ]]; then "$m" "$@"; return; fi
-  # "$ROOT#..." (not nixpkgs#, not .#) — nixpkgs# resolves via the flake REGISTRY
-  # (unstable), and this runs from any cwd, so the flake ref must be absolute.
-  if have nix; then nix run "$ROOT#ssh-to-age" -- "$@"; return; fi
-  die "ssh-to-age not found. Install: mise use -g github:Mic92/ssh-to-age (or: nix develop)"
-}
 
 # sops / age / age-keygen — the flake's PUREGO builds ONLY (flake.nix withPurego).
 # A stock or mise binary SILENTLY corrupts age ciphertext on this workstation: it is
@@ -205,6 +194,13 @@ node_recipient_ready() {
   grep -qE "^[[:space:]]*-[[:space:]]*&node_${s}[[:space:]]+age1" "$SOPS_YAML" && node_in_common_rule "$s"
 }
 host_key_path() { printf '%s/%s-ssh_host_ed25519_key' "$PRIVKEYS" "$1"; }
+# Each node's DEDICATED age identity (age-keygen). Private half kept here
+# (gitignored, break-glass), seeded at install to /var/lib/sops-nix/key.txt
+# (modules/sops.nix age.keyFile). THIS — not ssh-to-age of the SSH host key — is
+# what the secrets are encrypted to; the SSH host key is now only the node's SSH
+# host identity. (sops-nix's bundled ssh-to-age could not decrypt at boot.)
+node_age_key_path()  { printf '%s/%s-age.txt' "$PRIVKEYS" "$1"; }
+node_age_recipient() { age_keygen -y "$(node_age_key_path "$1")" 2>/dev/null | tr -d '[:space:]'; }
 committed() { git -C "$ROOT" ls-files --error-unmatch "$1" >/dev/null 2>&1; }
 tailnet_set() { ! grep -q 'tailnet = "<tailnet>";' "$FLAKE"; }
 # node is wired into flake.nix `hosts` (commented/in-prod-additive nodes are not).
@@ -279,6 +275,25 @@ ensure_host_key() {
   fi
 }
 
+# The node's DEDICATED age identity — what secrets/*.enc.yaml are encrypted to and
+# what gets seeded to /var/lib/sops-nix/key.txt at install. Generated once, kept in
+# private-keys/ (gitignored). Losing it = re-key that node.
+ensure_node_age_key() {
+  local node="$1" ak; ak="$(node_age_key_path "$node")"
+  if [[ -f "$ak" && "$FORCE" != 1 ]]; then
+    ok "node age key present ($ak)"; return
+  fi
+  if [[ -f "$ak" && "$FORCE" == 1 ]]; then
+    warn "REGENERATING $node age key — its recipient changes; .sops.yaml + updatekeys must follow."
+    confirm "really regenerate $node age key?" || { ok "kept existing age key"; return; }
+  fi
+  mkdir -p "$PRIVKEYS"; chmod 700 "$PRIVKEYS"
+  ( umask 077; age_keygen -o "$ak" >/dev/null 2>&1 )
+  ok "generated node age key ($ak)"
+  warn "BREAK-GLASS: this key decrypts $node's secrets. Keep an OFFLINE copy —"
+  warn "            losing it means re-keying $node (fleet new $node --force)."
+}
+
 # .sops.yaml: ensure the node's age recipient anchor + BOTH references exist
 # (keys anchor, common-rule ref, per-node tailscale rule). Idempotent and self-
 # healing: a half-applied prior run is completed on the next call.
@@ -341,8 +356,8 @@ ensure_recipient() {
   if node_recipient_ready "$node" && [[ "$FORCE" != 1 ]]; then
     ok ".sops.yaml recipient for $node ready"; return
   fi
-  local recip; recip="$(ssh_to_age -i "$(host_key_path "$node").pub")"
-  [[ "$recip" == age1* ]] || die "ssh-to-age did not return an age recipient for $node"
+  local recip; recip="$(node_age_recipient "$node")"
+  [[ "$recip" == age1* ]] || die "no dedicated age key for $node — run: fleet new $node (generates $(node_age_key_path "$node"))"
   sops_ensure_recipient "$s" "$recip"
 }
 
@@ -424,6 +439,7 @@ cmd_new() {
   ensure_common_secrets
   scaffold_nix "$node"
   ensure_host_key "$node"
+  ensure_node_age_key "$node"
   ensure_recipient "$node"
   ensure_authkey "$node"
   hdr "re-encrypt to the current recipient set"
@@ -455,19 +471,20 @@ cmd_install() {
   require_nix install
   need ssh
   [[ "$target" == *@* ]] || die "target must be user@host (e.g. root@192.0.2.10)"
-  local hk; hk="$(host_key_path "$node")"
-  [[ -f "$hk" ]] || die "no host key for $node — run: fleet new $node"
+  local hk ak; hk="$(host_key_path "$node")"; ak="$(node_age_key_path "$node")"
+  [[ -f "$hk" ]] || die "no SSH host key for $node — run: fleet new $node"
+  [[ -f "$ak" ]] || die "no dedicated age key for $node ($ak) — run: fleet new $node"
   encrypted "$COMMON" || die "secrets/common.enc.yaml is not encrypted — run: fleet new $node"
   node_recipient_ready "$node" || die "$node recipient missing in .sops.yaml — run: fleet new $node"
-  # Chicken-and-egg guard (a DESTRUCTIVE-wipe check): the host key about to be
-  # SEEDED (--extra-files) derives this node's age identity (ssh-to-age). If its
-  # recipient is NOT what the secrets were encrypted to, sops-nix fails at first-boot
-  # activation → no tailscale-authkey → the node never joins the mesh → the dpool
-  # `zfs load-key` unlock (only reachable over the mesh) is impossible on freshly
-  # wiped disks. Verify BEFORE wiping.
-  local seeded_recip; seeded_recip="$(ssh_to_age -i "$hk.pub" 2>/dev/null | tr -d '[:space:]' || true)"
-  [[ "$seeded_recip" == age1* ]] || die "cannot derive an age recipient from $hk.pub (ssh-to-age)."
-  grep -q "$seeded_recip" "$SOPS_YAML" || die "the host key to be seeded ($hk) derives recipient $seeded_recip, which is NOT in .sops.yaml — the secrets are encrypted to a DIFFERENT key, so $node could not decrypt them after install (no mesh, no unlock). Re-run 'fleet new $node' or re-encrypt to this key first."
+  # Chicken-and-egg guard (a DESTRUCTIVE-wipe check): the dedicated age key about to
+  # be SEEDED (--extra-files -> /var/lib/sops-nix/key.txt) is this node's sops-nix
+  # identity. If its recipient is NOT what the secrets were encrypted to, sops-nix
+  # fails at first-boot activation → no tailscale-authkey → the node never joins the
+  # mesh → the dpool `zfs load-key` unlock (only reachable over the mesh) is
+  # impossible on freshly wiped disks. Verify BEFORE wiping.
+  local seeded_recip; seeded_recip="$(node_age_recipient "$node")"
+  [[ "$seeded_recip" == age1* ]] || die "cannot read a recipient from $ak."
+  grep -q "$seeded_recip" "$SOPS_YAML" || die "$node's age key ($ak) has recipient $seeded_recip, which is NOT in .sops.yaml — the secrets are encrypted to a DIFFERENT key, so $node could not decrypt them after install (no mesh, no unlock). Re-run 'fleet new $node' or re-encrypt to this key first."
   committed "secrets/common.enc.yaml" || die "commit the encrypted secrets first (fleet secrets). A flake copies only git-tracked files."
   committed "hosts/$node.nix" || warn "hosts/$node.nix is not committed — the flake build will not see uncommitted files."
   flake_has_node "$node" || die "$node is not wired into flake.nix (its hosts entry is missing/commented). For an in-production additive node (e.g. node-d), wire its hardware-config and uncomment it in hosts/$node.nix + flake.nix hosts first."
@@ -519,6 +536,11 @@ cmd_install() {
   install -d -m700 "$xf/etc/ssh"
   install -m600 "$hk"     "$xf/etc/ssh/ssh_host_ed25519_key"
   install -m644 "$hk.pub" "$xf/etc/ssh/ssh_host_ed25519_key.pub"
+  # The node's DEDICATED age identity -> /var/lib/sops-nix/key.txt (modules/sops.nix
+  # age.keyFile). WITHOUT this the node has no sops identity and first-boot
+  # activation cannot decrypt ANY secret. Mode 0400 root (the tree is copied as-is).
+  install -d -m700 "$xf/var/lib/sops-nix"
+  install -m400 "$ak" "$xf/var/lib/sops-nix/key.txt"
   local dek=()
   if is_storage "$node"; then
     kf_src="$(mktemp)"; chmod 600 "$kf_src"; printf '%s' "$p1" > "$kf_src"
@@ -761,13 +783,13 @@ cmd_status() {
   # cell (mk), so headers and glyphs line up exactly. Prefix = 2+8+1+21 = 32. -----
   local rule; rule="$(printf '─%.0s' $(seq 1 86))"
   printf '\n  %s%-8s %-21s%s' "$B" 'NODE' 'ROLE' "$R"
-  local h; for h in key recip authkey commit install deploy; do printf '  %s%-7s%s' "$B" "$h" "$R"; done; printf '\n'
+  local h; for h in keys recip authkey commit install deploy; do printf '  %s%-7s%s' "$B" "$h" "$R"; done; printf '\n'
   printf '  %s%s%s\n' "$D" "$rule" "$R"
   local node type ts
   for node in "${nodes[@]}"; do
     type="$(type_of "$node" 2>/dev/null || echo '?')"; ts="$SECRETS/$node.enc.yaml"
     printf '  %-8s %-21s' "$node" "$(type_short "$type")"
-    printf '  %s      ' "$([[ -f "$(host_key_path "$node")" ]] && mk ok || mk no)"
+    printf '  %s      ' "$([[ -f "$(host_key_path "$node")" && -f "$(node_age_key_path "$node")" ]] && mk ok || mk no)"
     printf '  %s      ' "$(node_recipient_ready "$node" && mk ok || mk no)"
     printf '  %s      ' "$(encrypted "$ts" && mk ok || mk no)"
     printf '  %s      ' "$(committed "hosts/$node.nix" && mk ok || mk no)"
