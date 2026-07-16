@@ -31,6 +31,12 @@ in
     # recipient the secrets are encrypted to, so decryption would fail silently.
     age.keyFile = "/var/lib/sops-nix/key.txt";
     age.generateKey = false;
+    # ⚠️ sops-nix DEFAULTS age.sshKeyPaths to the ssh host keys, and
+    # sops-install-secrets tries those FIRST — deriving the OLD ssh-to-age recipient
+    # (which the secrets are no longer encrypted to) and failing "0 successful
+    # groups" before the keyFile is even used. Force it empty so ONLY the dedicated
+    # keyFile above is used. (This is the actual boot-decryption fix.)
+    age.sshKeyPaths = lib.mkForce [ ];
 
     # --- console rescue: root's password hash (PER NODE) ----------------------
     # modules/base.nix sets users.mutableUsers = false and no root password, which
