@@ -24,10 +24,19 @@ set -euo pipefail
 # committed. Override with FLEET_AGE_KEY_FILE if you store it elsewhere.
 AGE_KEY_FILE="${FLEET_AGE_KEY_FILE:-${HOME}/.config/sops/age/garage-fleet.txt}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: '$1' not found in PATH" >&2; exit 1; }; }
-need age-keygen
 need openssl
+# age-keygen (and, in the printed steps, sops) come from the flake's PUREGO builds,
+# NOT a stock/mise binary: this workstation is x86_64 emulated under Rosetta on an
+# Apple-Silicon Mac, and Rosetta mis-translates Go's asm ChaCha20-Poly1305, so a
+# stock sops/age silently produces ciphertext the real nodes cannot decrypt
+# (flake.nix withPurego; memory node-a-cpu-aead-miscompute). Resolve age once.
+need nix
+AGE_BIN="$(nix build --no-link --print-out-paths "${ROOT}#age" 2>/dev/null)/bin" \
+  || { echo "ERROR: could not build ${ROOT}#age (the purego age)" >&2; exit 1; }
+age_keygen() { "${AGE_BIN}/age-keygen" "$@"; }
 
 echo "==> garage-fleet secret bootstrap (separate trust domain — NOT prod keys)"
 echo
@@ -38,13 +47,13 @@ if [[ -f "${AGE_KEY_FILE}" ]]; then
 else
   echo "==> Generating fleet age keypair -> ${AGE_KEY_FILE}"
   mkdir -p "$(dirname "${AGE_KEY_FILE}")"
-  ( umask 077; age-keygen -o "${AGE_KEY_FILE}" )
+  ( umask 077; age_keygen -o "${AGE_KEY_FILE}" )
   echo "    ⚠️  BREAK-GLASS: copy this private key offline to TWO physical"
   echo "        locations (paper/steel + password manager). Losing it makes"
   echo "        every fleet-encrypted secret an unreadable brick (doc 09 §8)."
 fi
 
-RECIPIENT="$(age-keygen -y "${AGE_KEY_FILE}")"
+RECIPIENT="$(age_keygen -y "${AGE_KEY_FILE}")"
 echo
 echo "==> Fleet age RECIPIENT (public key). Paste this in garage-fleet/.sops.yaml"
 echo "    in place of the age1FLEET… placeholder:"
@@ -63,39 +72,48 @@ METRICS_TOKEN="$(openssl rand -hex 32)"
 # install seed (hosts/disko-storage.nix). Catastrophic-loss break-glass item.
 ZFS_PASSPHRASE="$(openssl rand -base64 32)"
 
-echo "==> Generated shared Garage secrets. Put them in common.enc.yaml:"
+echo "==> Generated shared Garage secrets. These three go in common.enc.yaml:"
 echo
 echo "        rpc_secret     = ${RPC_SECRET}"
 echo "        admin_token    = ${ADMIN_TOKEN}"
 echo "        metrics_token  = ${METRICS_TOKEN}"
+echo
+echo "==> Suggested ZFS dataset passphrase (do NOT commit — see below):"
+echo
 echo "        zfs-passphrase = ${ZFS_PASSPHRASE}"
-echo "    ⚠️  zfs-passphrase is BREAK-GLASS + catastrophic-loss: keep an offline"
-echo "        copy in two physical locations (doc 09 §8)."
+echo "    ⚠️  NEVER put zfs-passphrase in ANY sops file (CLAUDE.md): the node ships"
+echo "        <node>.enc.yaml, so a stored passphrase means a stolen box unlocks its"
+echo "        own backups. Keep it OFFLINE only (password manager + a second physical"
+echo "        copy); it is typed at 'fleet install' and each unlock (prompt-unlock)."
 echo
 
 # --- 3. how to encrypt the templates ----------------------------------------
 cat <<EOF
 ==> Next steps (encrypt the templates into real sops files):
 
+  # ⚠️ sops MUST be the flake's purego build (Rosetta corrupts a stock/mise sops —
+  #    see top of this script). Use \`mise run sops -- …\` from the repo root, or the
+  #    absolute \`nix run "${ROOT}#sops" -- …\` shown below. NEVER a bare \`sops\`.
+
   # a) Make sure garage-fleet/.sops.yaml has the recipient above (and, after
-  #    provisioning each node, that node's ssh-to-age recipient too), then:
+  #    provisioning each node, that node's dedicated age recipient too), then:
   export SOPS_AGE_KEY_FILE="${AGE_KEY_FILE}"
 
   # b) Shared secrets — copy the template, fill the values printed above:
   cp "${SCRIPT_DIR}/common.enc.yaml.example" "${SCRIPT_DIR}/common.enc.yaml"
-  \$EDITOR "${SCRIPT_DIR}/common.enc.yaml"        # paste rpc/admin/metrics/zfs-passphrase
-  sops -e -i "${SCRIPT_DIR}/common.enc.yaml"       # encrypt in place
+  \$EDITOR "${SCRIPT_DIR}/common.enc.yaml"        # paste rpc/admin/metrics
+  nix run "${ROOT}#sops" -- -e -i "${SCRIPT_DIR}/common.enc.yaml"   # encrypt in place (purego)
 
   # c) Per-node Tailscale auth key (mint a reusable, non-ephemeral, tagged key
   #    in the Tailscale admin console with tag:garage — doc 09 §8, doc 10 P0):
   for n in node-a node-b node-c node-d; do
     cp "${SCRIPT_DIR}/node.enc.yaml.example" "${SCRIPT_DIR}/\${n}.enc.yaml"
     \$EDITOR "${SCRIPT_DIR}/\${n}.enc.yaml" # paste tskey-auth-…
-    sops -e -i "${SCRIPT_DIR}/\${n}.enc.yaml"
+    nix run "${ROOT}#sops" -- -e -i "${SCRIPT_DIR}/\${n}.enc.yaml"
   done
 
   # d) Verify a node can decrypt (after adding its recipient + re-encrypting):
-  sops -d "${SCRIPT_DIR}/common.enc.yaml" >/dev/null && echo "decrypt OK"
+  nix run "${ROOT}#sops" -- -d "${SCRIPT_DIR}/common.enc.yaml" >/dev/null && echo "decrypt OK"
 
 ==> Reminder: ZFS dataset passphrase + restic/Kopia/age repo passwords are also
     break-glass items (doc 09 §8). The ZFS key is seeded at install via
