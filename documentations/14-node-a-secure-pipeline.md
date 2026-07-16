@@ -11,6 +11,22 @@ prompt-unlock flow in [doc 13](13-node-a-b-install.md).
 > this doc frames them in order with the reasoning. Where the two ever disagree,
 > `secureboot.nix` wins.
 
+> **STATUS (2026-07):** node-A is installed, deployed, and healthy — LUKS/TPM boot,
+> both pools ONLINE, `garage.service` active, tailscale up. Two hard-won corrections
+> are folded into the steps below:
+>
+> - **sops/age MUST be the flake's `-tags=purego` builds** (`mise run sops`,
+>   `nix run .#sops`/`.#age`, or `nix develop`) — NEVER a stock/mise binary. This
+>   workstation is x86_64 under **Rosetta on Apple Silicon**, and Rosetta
+>   mis-translates Go's asm ChaCha20-Poly1305, so a stock sops silently emits
+>   corrupt ciphertext the node can't decrypt (`sops-install-secrets`: `0 successful
+>   groups`). The nodes' own AMD CPUs are fine; only the emulated workstation is
+>   affected. `scripts/fleet`/`mise.toml`/`gen-secrets.sh` already route through the
+>   safe builds.
+> - **Node identity is a DEDICATED age key** (`private-keys/node-a-age.txt` →
+>   `/var/lib/sops-nix/key.txt`), NOT ssh-to-age of the SSH host key. `fleet new`
+>   mints it, `fleet install` seeds it via `--extra-files`.
+
 ---
 
 ## 0. The picture — two trust domains on one box
@@ -49,7 +65,7 @@ HDD /dev/sda
 | **lanzaboote signed UKIs + Secure Boot** | a thief editing the kernel cmdline (`init=/bin/sh`) to get a shell on decrypted root | a firmware-level attacker with the supervisor password |
 | **ZFS-native `dpool` (manual gate)** | the **backups** — ciphertext even on a powered-on stolen box | nothing, once you've typed the passphrase over the mesh |
 | **tailnet-only firewall** (nftables) | S3/RPC/admin reachable off the mesh | someone already on the tailnet (deny-by-default ACL handles that) |
-| **per-node age key** (ssh-to-age) | one node's compromise decrypting another's secrets | that node's own secrets |
+| **per-node DEDICATED age key** (`private-keys/<node>-age.txt` → `/var/lib/sops-nix/key.txt`) | one node's compromise decrypting another's secrets | that node's own secrets |
 
 **The two theft scenarios, concretely:**
 
@@ -110,10 +126,11 @@ SSH_PASS=root ./scripts/fleet install node-a root@192.168.1.22 -- --env-password
 
 What happens, in order:
 
-1. **Pre-wipe guards** (before anything is destroyed): the seeded SSH host key's
-   `ssh-to-age` recipient must match what the secrets are encrypted to (else the
-   node could never decrypt them after install → no mesh → no unlock). fleet also
-   confirms `lsblk` device paths and that secrets are committed.
+1. **Pre-wipe guards** (before anything is destroyed): the node's DEDICATED age key
+   (`private-keys/node-a-age.txt`, seeded to `/var/lib/sops-nix/key.txt`) must have a
+   recipient matching what the secrets are encrypted to (else the node could never
+   decrypt them after install → no mesh → no unlock). fleet also confirms `lsblk`
+   device paths and that secrets are committed.
 2. **Two passphrase prompts:**
    - *ZFS (dpool) passphrase* → uploaded to the installer's RAM at
      `/tmp/fleet-zfs.key`, used by disko to format `dpool/garage`, then
