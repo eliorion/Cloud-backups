@@ -31,7 +31,10 @@
 #   fleet guide   <node>        Print the on-box fallback runbook (doc 13).
 #
 # Tool needs:
-#   new / secrets : sops, age, ssh-to-age, openssl, ssh-keygen, git  (NO nix)
+#   new / secrets : nix (purego sops/age from the flake), ssh-to-age, openssl,
+#                   ssh-keygen, git. sops/age MUST be the flake's -tags=purego
+#                   builds — a stock/mise binary silently corrupts age ciphertext
+#                   on this Rosetta (Apple-Silicon) workstation (see sops()/age()).
 #   install/deploy/rollback : nix (+ ssh)  — these build/activate the flake
 # Secrets are never echoed. private-keys/ + node-*-extra/ are gitignored and
 # never staged. Only ENCRYPTED secrets/*.enc.yaml are committed.
@@ -104,10 +107,32 @@ ssh_to_age() {
   die "ssh-to-age not found. Install: mise use -g github:Mic92/ssh-to-age (or: nix develop)"
 }
 
+# sops / age / age-keygen — the flake's PUREGO builds ONLY (flake.nix withPurego).
+# A stock or mise binary SILENTLY corrupts age ciphertext on this workstation: it is
+# x86_64 emulated under Rosetta on an Apple-Silicon Mac, and Rosetta mis-translates
+# Go's asm ChaCha20-Poly1305, so files encrypted here are undecryptable by the real
+# nodes (sops-nix activation fails "0 successful groups required, got 0"). The purego
+# build uses the generic Go path, which Rosetta translates correctly. Resolve the
+# store paths ONCE (nix build, cached) so the interactive menus stay snappy, then
+# shadow the PATH binaries so every `sops`/`age` call below is the safe one.
+_SOPS_BIN=""; _AGE_BIN=""; _AGEKEYGEN_BIN=""
+_purego_resolve() {
+  [[ -n "$_SOPS_BIN" ]] && return 0
+  require_nix "secrets"
+  local sd ad
+  sd="$(nix build --no-link --print-out-paths "$ROOT#sops" 2>/dev/null)" || die "could not build the purego sops (nix build $ROOT#sops)"
+  ad="$(nix build --no-link --print-out-paths "$ROOT#age"  2>/dev/null)" || die "could not build the purego age (nix build $ROOT#age)"
+  _SOPS_BIN="$sd/bin/sops"; _AGE_BIN="$ad/bin/age"; _AGEKEYGEN_BIN="$ad/bin/age-keygen"
+}
+sops()       { _purego_resolve; "$_SOPS_BIN" "$@"; }
+age()        { _purego_resolve; "$_AGE_BIN" "$@"; }
+age_keygen() { _purego_resolve; "$_AGEKEYGEN_BIN" "$@"; }
+
 require_nix() {
   have nix && return 0
   err "nix is required for '$1' but is not on PATH."
-  note "This (devcontainer) is fine for 'new'/'secrets'/'status'. Run '$1' from a host with nix."
+  note "'new'/'secrets' now need nix too — sops/age come from the flake's purego builds"
+  note "(a stock/mise sops corrupts ciphertext under Rosetta). 'status' works without nix."
   note "Install nix here if you must: sh <(curl -L https://install.determinate.systems/nix) (then reopen the shell)"
   exit 1
 }
@@ -199,12 +224,12 @@ ensure_fleet_key() {
    OLD key present and re-key the secrets with 'fleet secrets' -> re-encrypt.)"
   else
     mkdir -p "$(dirname "$FLEET_AGE_KEY_FILE")"
-    ( umask 077; age-keygen -o "$FLEET_AGE_KEY_FILE" >/dev/null 2>&1 )
+    ( umask 077; age_keygen -o "$FLEET_AGE_KEY_FILE" >/dev/null 2>&1 )
     ok "generated fleet age key ($FLEET_AGE_KEY_FILE)"
     warn "BREAK-GLASS: copy this private key OFFLINE to two locations — losing it"
     warn "             makes every committed secret undecryptable from the workstation."
   fi
-  local recip; recip="$(age-keygen -y "$FLEET_AGE_KEY_FILE")"
+  local recip; recip="$(age_keygen -y "$FLEET_AGE_KEY_FILE")"
   if [[ -n "$wired" ]]; then
     [[ "$wired" == "$recip" ]] || die "local fleet key recipient ($recip) != .sops.yaml ($wired) — wrong/old key in $FLEET_AGE_KEY_FILE."
     ok "fleet recipient matches .sops.yaml"
@@ -391,7 +416,7 @@ cmd_new() {
     --force) FORCE=1; shift;;
     *) die "unknown option: $1";;
   esac; done
-  for t in sops age age-keygen openssl ssh-keygen git; do need "$t"; done
+  for t in openssl ssh-keygen git; do need "$t"; done  # sops/age via the purego wrappers (nix)
   [[ -f "$SOPS_YAML" ]] || die "run from the repo (.sops.yaml not found)"
   local type; type="$(type_of "$node")"
   hdr "new $node — type $type ($(type_desc "$type"))"
@@ -683,10 +708,9 @@ cmd_config() {
 
 # ============================================================================= secrets
 cmd_secrets() {
-  need sops
   while :; do
     hdr "secrets"
-    shopt -s nullglob; local files=("$SECRETS"/*.sops.yaml); shopt -u nullglob
+    shopt -s nullglob; local files=("$SECRETS"/*.enc.yaml); shopt -u nullglob
     local i=1
     for f in "${files[@]}"; do
       if encrypted "$f"; then printf '  %2d) %s  %s✔enc%s\n' "$i" "$(basename "$f")" "$G" "$R"
@@ -697,9 +721,9 @@ cmd_secrets() {
     local choice; choice="$(ask 'choice')"
     case "$choice" in
       e*) local n="${choice#e }"; n="${n// /}"; [[ "$n" =~ ^[0-9]+$ ]] && sops "${files[$((n-1))]}" || warn "give an index, e.g. 'e 1'";;
-      v)  local bad; bad="$(grep -L '^sops:' "$SECRETS"/*.sops.yaml 2>/dev/null || true)"
+      v)  local bad; bad="$(grep -L '^sops:' "$SECRETS"/*.enc.yaml 2>/dev/null || true)"
           if [[ -n "$bad" ]]; then err "PLAINTEXT files — NOT staging:"; printf '   %s\n' $bad
-          else git -C "$ROOT" add .sops.yaml "$SECRETS"/*.sops.yaml flake.nix hosts/ 2>/dev/null
+          else git -C "$ROOT" add .sops.yaml "$SECRETS"/*.enc.yaml flake.nix hosts/ 2>/dev/null
                ok "staged .sops.yaml + encrypted secrets + flake/hosts"; git -C "$ROOT" status --short | sed 's/^/   /'
                note "now: git commit -m 'fleet: add/update node secrets'"; fi;;
       r)  for f in "${files[@]}"; do sops --config "$SOPS_YAML" updatekeys -y "$f" >/dev/null && ok "updatekeys $(basename "$f")"; done;;
