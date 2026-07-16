@@ -100,7 +100,7 @@
 
       # MagicDNS tailnet for the deploy-rs targetHosts. TODO operator
       # (`scripts/fleet config tailnet <name>`): replace <tailnet>.
-      tailnet = "<tailnet>";
+      tailnet = "tail45b0ca";
 
       # Install-only tmpfs keyfile (see modules/base.nix `fleet.zfsInstallKeyfile`).
       # The `<node>-install` variants set it so nixos-anywhere can format the

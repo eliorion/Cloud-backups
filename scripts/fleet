@@ -64,10 +64,21 @@ FORCE=0
 
 # ----------------------------------------------------------------------------- ui
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
-  B=$'\e[1m'; R=$'\e[0m'; G=$'\e[32m'; Y=$'\e[33m'; RED=$'\e[31m'; C=$'\e[36m'
+  B=$'\e[1m'; R=$'\e[0m'; G=$'\e[32m'; Y=$'\e[33m'; RED=$'\e[31m'; C=$'\e[36m'; D=$'\e[90m'
 else
-  B=''; R=''; G=''; Y=''; RED=''; C=''
+  B=''; R=''; G=''; Y=''; RED=''; C=''; D=''
 fi
+# Status glyph for the status table: SINGLE display cell each (U+2713/2717/00B7 —
+# NOT the heavy ✔/✘ U+2714/2718, which take an emoji-presentation double cell and
+# break column alignment). Colour codes have zero display width, so a cell is
+# printed as "glyph + literal spaces" and the columns line up regardless of colour.
+mk() {
+  case "$1" in
+    ok) printf '%s✓%s' "$G"   "$R" ;;
+    no) printf '%s✗%s' "$RED" "$R" ;;
+    *)  printf '%s·%s' "$D"   "$R" ;; # na / not-yet
+  esac
+}
 ok()   { printf '%s✔%s %s\n' "$G" "$R" "$*"; }
 warn() { printf '%s⚠%s %s\n' "$Y" "$R" "$*"; }
 err()  { printf '%s✘%s %s\n' "$RED" "$R" "$*" >&2; }
@@ -138,6 +149,16 @@ type_desc() {
     B) printf 'storage + proxy (offsite)';;
     C) printf 'storage + proxy (offsite)';;
     D) printf 'gateway (proxy only, no data)';;
+  esac
+}
+# Compact role for the fixed-width status table (≤21 chars).
+type_short() {
+  case "$1" in
+    A) printf 'onsite storage + ws';;
+    B) printf 'offsite-1 store+proxy';;
+    C) printf 'offsite-2 store+proxy';;
+    D) printf 'gateway (no data)';;
+    *) printf '?';;
   esac
 }
 
@@ -698,22 +719,40 @@ cmd_status() {
       nodes+=("$(basename "${f%.nix}")"); done; shopt -u nullglob
   fi
   hdr "fleet status"
-  printf '  fleet age key : %s\n' "$([[ -f "$FLEET_AGE_KEY_FILE" ]] && echo "✔ $FLEET_AGE_KEY_FILE" || echo "✘ missing")"
-  printf '  .sops fleet   : %s\n' "$(recipient_set && echo ✔ || echo '✘ placeholder')"
-  printf '  common secret : %s\n' "$(encrypted "$COMMON" && echo ✔enc || echo ✘)"
-  printf '  tailnet       : %s\n' "$(tailnet_set && echo "✔ $(grep -oP 'tailnet = "\K[^"]+' "$FLAKE" | head -1)" || echo '✘ <tailnet>')"
-  printf '\n  %-8s %-26s %-7s %-7s %-7s %-7s %-6s %-6s\n' node type key recip authkey commit inst depl
+
+  # --- workstation-side readiness (label-aligned; glyph then free text) -------
+  printf '  %-16s %s  %s\n' 'fleet age key' \
+    "$([[ -f "$FLEET_AGE_KEY_FILE" ]] && mk ok || mk no)" \
+    "$([[ -f "$FLEET_AGE_KEY_FILE" ]] && printf '%s' "$FLEET_AGE_KEY_FILE" || printf 'missing')"
+  printf '  %-16s %s\n'     '.sops recipients' "$(recipient_set && mk ok || mk no)"
+  printf '  %-16s %s  %s\n' 'common secret' \
+    "$(encrypted "$COMMON" && mk ok || mk no)" \
+    "$(encrypted "$COMMON" && printf 'encrypted' || printf 'NOT encrypted')"
+  printf '  %-16s %s  %s\n' 'tailnet' \
+    "$(tailnet_set && mk ok || mk no)" \
+    "$(tailnet_set && grep -oP 'tailnet = "\K[^"]+' "$FLAKE" | head -1 || printf '<unset>')"
+
+  # --- per-node table. Each status column is 9 cells: a header "  %-7s" (2+7) and
+  # a data cell "  <glyph>      " (2 + 1 glyph + 6 spaces). The glyph is one display
+  # cell (mk), so headers and glyphs line up exactly. Prefix = 2+8+1+21 = 32. -----
+  local rule; rule="$(printf '─%.0s' $(seq 1 86))"
+  printf '\n  %s%-8s %-21s%s' "$B" 'NODE' 'ROLE' "$R"
+  local h; for h in key recip authkey commit install deploy; do printf '  %s%-7s%s' "$B" "$h" "$R"; done; printf '\n'
+  printf '  %s%s%s\n' "$D" "$rule" "$R"
+  local node type ts
   for node in "${nodes[@]}"; do
-    local type ts; type="$(type_of "$node" 2>/dev/null || echo '?')"; ts="$SECRETS/$node.enc.yaml"
-    printf '  %-8s %-26s %-7s %-7s %-7s %-7s %-6s %-6s\n' \
-      "$node" "$(type_desc "$type" 2>/dev/null || echo '?')" \
-      "$([[ -f "$(host_key_path "$node")" ]] && echo ✔ || echo ✘)" \
-      "$(node_recipient_ready "$node" && echo ✔ || echo ✘)" \
-      "$(encrypted "$ts" && echo ✔ || echo ✘)" \
-      "$(committed "hosts/$node.nix" && echo ✔ || echo ✘)" \
-      "$([[ -f "$STATE_DIR/installed-$node" ]] && echo ✔ || echo -)" \
-      "$([[ -f "$STATE_DIR/deployed-$node" ]] && echo ✔ || echo -)"
+    type="$(type_of "$node" 2>/dev/null || echo '?')"; ts="$SECRETS/$node.enc.yaml"
+    printf '  %-8s %-21s' "$node" "$(type_short "$type")"
+    printf '  %s      ' "$([[ -f "$(host_key_path "$node")" ]] && mk ok || mk no)"
+    printf '  %s      ' "$(node_recipient_ready "$node" && mk ok || mk no)"
+    printf '  %s      ' "$(encrypted "$ts" && mk ok || mk no)"
+    printf '  %s      ' "$(committed "hosts/$node.nix" && mk ok || mk no)"
+    printf '  %s      ' "$([[ -f "$STATE_DIR/installed-$node" ]] && mk ok || mk na)"
+    printf '  %s      ' "$([[ -f "$STATE_DIR/deployed-$node" ]] && mk ok || mk na)"
+    printf '\n'
   done
+  printf '  %s%s  %s✓%s ready  %s✗%s missing  %s·%s not-yet%s\n' \
+    "$D" 'legend:' "$G" "$D" "$RED" "$D" "$D" "$D" "$R"
 }
 
 # ============================================================================= guide
