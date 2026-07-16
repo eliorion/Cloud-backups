@@ -3,19 +3,32 @@
 # CLIs used by documentations/12. Mirrors the main k3s workspace's mise setup.
 [tools]
 node = "lts"                         # Node.js >=18, required by caveman install (scripts/setup)
-# ⚠️ sops/age are DELIBERATELY NOT here. This repo's devcontainer is x86_64
-# EMULATED under Rosetta on an Apple-Silicon Mac, and Rosetta mis-translates Go's
-# asm ChaCha20-Poly1305 — so ANY prebuilt x86 sops/age (what mise ships) silently
+# ⚠️ sops/age/ssh-to-age are DELIBERATELY NOT mise [tools]. This repo's devcontainer
+# is x86_64 EMULATED under Rosetta on an Apple-Silicon Mac, and Rosetta mis-translates
+# Go's asm ChaCha20-Poly1305 — so ANY prebuilt x86 sops/age (what mise ships) silently
 # produces CORRUPT age ciphertext that real nodes cannot decrypt (sops-nix fails
-# "0 successful groups"). Use `nix develop` instead: flake.nix builds sops/age with
-# `-tags=purego` (generic Go, Rosetta-safe). Run all sops/age via the devShell or
-# `nix run .#sops` / `.#age`. See flake.nix withPurego + memory node-a-cpu-aead-miscompute.
-"github:Mic92/ssh-to-age" = "1.1.11"  # key CONVERSION only (no AEAD), Rosetta-safe
+# "0 successful groups"). They come from the flake instead, built with `-tags=purego`
+# (generic Go, Rosetta-safe): `mise run sops …` / `mise run age …` (tasks below),
+# `nix run .#sops` / `.#age` / `.#ssh-to-age`, or `nix develop`. See flake.nix
+# withPurego + memory node-a-cpu-aead-miscompute.
 jq = "latest"
 shellcheck = "latest"
 uv = "latest"                        # for graphify (scripts/setup)
 gh = "latest"
 # --- tasks: thin wrappers over the doc-12 workstation steps -------------------
+# ⚠️ ALWAYS run sops/age through these tasks (or `nix develop`), NEVER a stock
+# binary: they resolve to the purego builds (flake.nix withPurego), the only
+# Rosetta-safe path on this Apple-Silicon devcontainer. Args pass straight through,
+# e.g. `mise run sops edit secrets/node-a.enc.yaml`, `mise run sops updatekeys ...`,
+# `mise run age -- -d -i key.txt file.age`. Needs SOPS_AGE_KEY_FILE in the env.
+[tasks.sops]
+description = "Rosetta-safe sops (purego, via nix) — use for ALL edit/encrypt/decrypt/updatekeys"
+run = "nix run .#sops --"
+
+[tasks.age]
+description = "Rosetta-safe age (purego, via nix) — use for ALL encrypt/decrypt"
+run = "nix run .#age --"
+
 [tasks.lock]
 description = "Resolve flake inputs -> flake.lock (no build; arch-independent)"
 run = "nix flake lock"
