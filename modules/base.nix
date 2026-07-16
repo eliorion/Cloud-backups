@@ -63,6 +63,32 @@
       example = "/tmp/fleet-zfs.key";
       description = "Install-only tmpfs path the ZFS passphrase is uploaded to (nixos-anywhere --disk-encryption-keys); null at runtime = keylocation=prompt.";
     };
+
+    # Install-only tmpfs path for the cryptwork LUKS passphrase (node-A's TPM-auto
+    # root domain). SET by hosts/disko-node-a.nix in the `-install` variant, so
+    # scripts/fleet can detect that this node needs a SECOND --disk-encryption-keys
+    # pair (a DIFFERENT passphrase from the dpool ZFS one — the LUKS keyslot-0 is the
+    # TPM recovery secret). null on runtime configs and on every non-LUKS node.
+    luksInstallKeyfile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "/tmp/fleet-luks.key";
+      description = "Install-only tmpfs path the cryptwork LUKS passphrase is uploaded to; null at runtime and on non-LUKS nodes (node-A only).";
+    };
+
+    # STAGED bootstrap flag for lanzaboote Secure Boot (node-A, modules/secureboot.nix).
+    # MUST stay false through BOTH `fleet install` AND the first `fleet deploy`:
+    # lanzaboote's activation hook signs every UKI with /etc/secureboot/keys, which do
+    # NOT exist until the on-box `sbctl create-keys` step — enabling it earlier makes
+    # nixos-install/switch fail after the disks are already wiped (unbootable box).
+    # The operator flips this true in hosts/node-a.nix ONLY after create-keys, then
+    # deploys (signs UKIs) → enrolls keys + enables Secure Boot in firmware → seals the
+    # TPM. See the runbook in modules/secureboot.nix. false = systemd-boot (unsigned).
+    secureBoot = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "node-A only: true = lanzaboote signed-UKI Secure Boot; false = systemd-boot. Keep false until sbctl keys exist on the box (see modules/secureboot.nix runbook).";
+    };
   };
 
   config = {
@@ -97,10 +123,23 @@
     # --- users ---------------------------------------------------------------
     # Key-only admin user. Password login is disabled fleet-wide (see sshd).
     users.mutableUsers = false;
-    users.users.ops = {
+    # `sysadmin` is the fleet's single human operator user (was `ops`). On node-A
+    # it doubles as the devcontainer host user — modules/workstation.nix ADDS the
+    # `docker` group there, so sysadmin ends up in [ wheel docker ] on node-A and
+    # [ wheel ] on B/C/D. `docker` is NOT listed here on purpose: the group only
+    # exists where virtualisation.docker is enabled (node-A); putting it here would
+    # name a group absent on B/C/D. (extraGroups referencing a missing group is
+    # silently ignored — users-groups.nix only asserts on the PRIMARY group — but
+    # it would mislead a reader; list options merge, so workstation.nix is the
+    # right place for the node-A-only membership.)
+    users.users.sysadmin = {
       isNormalUser = true;
+      uid = 2000; # PINNED: deterministic ownership of node-A's wpool/home ZFS
+      # dataset across rebuilds (hosts/disko-node-a.nix). Harmless on B/C/D.
       extraGroups = [ "wheel" ];
-      # Operator break-glass admin key (Mac, forwarded via ssh-agent into the devcontainer).
+      # Operator break-glass + interactive/DevPod key (Mac). NOTE: on node-A this
+      # user's SSH login sets AllowAgentForwarding no (modules/workstation.nix);
+      # deploy-rs/nixos-anywhere use root, not this user.
       openssh.authorizedKeys.keys = [
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDW1Q2aJgg7HzWHshxgu2alaNuSQ4JV23PSDoP9bY1qu skh@MacBook-Air-de-samuel-3.local"
       ];

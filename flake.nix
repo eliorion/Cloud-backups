@@ -43,16 +43,25 @@
     # enters a nixosConfiguration, so there is nothing to dedup, and pinning it
     # to our 25.05 nixpkgs only risks breaking the tool's own build.
     nixos-anywhere.url = "github:nix-community/nixos-anywhere";
+
+    # Secure Boot: signed Unified Kernel Images. node-A ONLY (its module is
+    # imported per-host, not in commonModules) — B/C/D keep systemd-boot until
+    # each has had its own firmware key-enrollment trip. Pinned; Renovate-tracked.
+    lanzaboote = {
+      url = "github:nix-community/lanzaboote/v0.4.2";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    {
+    inputs@{
       self,
       nixpkgs,
       disko,
       sops-nix,
       deploy-rs,
       nixos-anywhere,
+      lanzaboote,
       ...
     }:
     let
@@ -102,6 +111,10 @@
         modules:
         lib.nixosSystem {
           inherit system;
+          # specialArgs passes the flake inputs to modules so a per-host module
+          # (modules/secureboot.nix on node-A) can import an input's nixosModule
+          # (inputs.lanzaboote.nixosModules.lanzaboote) without wiring it here.
+          specialArgs = { inherit inputs; };
           modules = commonModules ++ modules;
         };
     in
