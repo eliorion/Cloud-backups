@@ -1,5 +1,17 @@
 # 13 — node-A + node-B install runbook (dual-disk; node-A LUKS/TPM root, node-B prompt-unlock)
 
+> **CORRECTIONS (2026-07) — these supersede the body where they conflict:**
+> - **sops/age = the flake's `-tags=purego` builds ONLY** (`mise run sops`,
+>   `nix run .#sops`/`.#age`, `nix develop`). This workstation is x86_64 under
+>   **Rosetta on Apple Silicon**, which mis-translates Go's asm ChaCha20-Poly1305, so
+>   a stock/mise sops silently emits corrupt ciphertext the nodes can't decrypt.
+>   `scripts/fleet` already routes through the safe builds — prefer it over raw sops.
+> - **Node identity is a DEDICATED age key** (`private-keys/<node>-age.txt` →
+>   `/var/lib/sops-nix/key.txt`), **not** ssh-to-age of the SSH host key. `fleet new`
+>   mints it and writes the recipient to `.sops.yaml`; `fleet install` seeds it. Any
+>   `ssh-to-age`/`age-keygen`/`sops` step below is handled by `scripts/fleet` now.
+> - node-A is already installed, deployed, and healthy (garage running).
+
 The single, ordered, copy-paste runbook for installing the **first two** fleet
 nodes from bare metal to a running Garage cluster:
 

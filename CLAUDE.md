@@ -68,7 +68,9 @@ already in production** — reconfigure it **additively** (do not import
   prompts for TWO passphrases — see below), `fleet deploy <node>` (deploy-rs),
   `fleet finalize <node> root@host` (retry the post-install dpool unlock),
   `fleet config tailnet <name>` (slug only — `.ts.net` is appended), `fleet secrets`,
-  `fleet status`. `new`/`secrets` need sops+age (no nix); `install`/`deploy` need nix.
+  `fleet status`. ALL of these now need nix — sops/age come from the flake's
+  **purego** builds (`nix run .#sops`/`.#age`), never a stock/mise binary (see the
+  Rosetta note below).
 - **deploy-rs, not Flux** (`fleet deploy <node>` wraps it): `nix run .#deploy-rs -- .#node-a`. Magic
   rollback auto-reverts a bad firewall/tailscaled change in ~30s, but only once a
   *prior* generation was also deploy-rs-deployed — do the first post-install
@@ -76,10 +78,14 @@ already in production** — reconfigure it **additively** (do not import
   `~/.ssh/config` keyed by the Tailscale MagicDNS name.
 - **Provision** with disko + nixos-anywhere (`fleet install <node> root@host` wraps
   this against the `.#<node>-install` variant) (`--flake .#node-a`,
-  `--disk-encryption-keys`, `--extra-files` seeds the SSH host key,
-  `--generate-hardware-config`). After install, **add that node's `ssh-to-age`
-  recipient to `.sops.yaml` and re-encrypt the shared secrets before the first
-  `deploy-rs` push** — else activation can't decrypt and `switch` fails.
+  `--disk-encryption-keys`, `--generate-hardware-config`). `--extra-files` seeds
+  BOTH the SSH host key AND the node's **dedicated age key** to
+  `/var/lib/sops-nix/key.txt` (`modules/sops.nix` `age.keyFile`) — WITHOUT the age
+  key, first-boot activation can't decrypt any secret and `switch` fails. `fleet
+  new <node>` mints that key (`private-keys/<node>-age.txt`) and writes its
+  recipient into `.sops.yaml`, so the recipient is set BEFORE install, not after.
+  (This replaced the old ssh-to-age-derived identity, which could not decrypt at
+  boot.)
 - **Garage layout** is imperative: `garage layout assign … -z <zone> -c <bytes>`,
   then `garage layout apply --version <prev+1>` — exactly `prev+1`, once.
 - **Garage version**: design target is `v2.3.0` (docs 09/10), but what actually
@@ -102,6 +108,22 @@ already in production** — reconfigure it **additively** (do not import
   gitignored secret is invisible to sops-nix activation). Verify each is encrypted
   before committing (`grep -L 'sops:' secrets/*.enc.yaml` returns nothing). Never
   commit plaintext secrets or the ZFS/age private keys.
+- ⚠️ **sops/age MUST be the flake's `-tags=purego` builds** (`nix run .#sops`/`.#age`,
+  `mise run sops`, or `nix develop`) — NEVER a stock or mise-installed binary. This
+  devcontainer is x86_64 **emulated under Rosetta on an Apple-Silicon Mac**
+  (`/proc/cpuinfo` model name `VirtualApple`), and Rosetta mis-translates Go's asm
+  ChaCha20-Poly1305, so a stock sops/age SILENTLY produces corrupt age ciphertext:
+  it decrypts on the workstation but no real node can (`sops-install-secrets` fails
+  `0 successful groups required, got 0`, starving garage/tailscale). `flake.nix`
+  `withPurego` builds the Rosetta-safe variants; `scripts/fleet`, `mise.toml`, and
+  `secrets/gen-secrets.sh` all route through them. X25519 and AES-GCM survive
+  Rosetta — only ChaCha20-Poly1305 asm is wrong; the nodes' own AMD CPUs are fine.
+- **Per-node identity = a DEDICATED age key**, `private-keys/<node>-age.txt`
+  (gitignored, break-glass), whose recipient is in `.sops.yaml` and whose private
+  half `fleet install` seeds to `/var/lib/sops-nix/key.txt` (`modules/sops.nix`
+  `age.keyFile`; `age.sshKeyPaths = mkForce []`). This REPLACED deriving the identity
+  from the SSH host key via ssh-to-age (which sops-nix's bundled ssh-to-age could
+  not decrypt at boot). The SSH host key is now only the node's SSH host identity.
 - **Secrets layout** — `common.enc.yaml` = ONLY fleet-identical values
   (`rpc_secret`/`admin_token`/`metrics_token`), encrypted to every node.
   `<node>.enc.yaml` = everything node-specific (`authkey`, `root_password_hash`),
@@ -111,12 +133,12 @@ already in production** — reconfigure it **additively** (do not import
   BUILD time (sops-nix validates the manifest), so it cannot brick a node.
   Edit with `sops edit` — `sops decrypt > file.yaml` leaves plaintext in the tree
   (`.gitignore` denies `secrets/*.yaml`, but do not rely on it).
-- **Never put `zfs-passphrase` in ANY sops file.** The node's age key is derived
-  from its SSH host key on the root (unencrypted ext4 on B/C; on node-A the root is
-  LUKS/TPM but is auto-unlocked at runtime, so a powered-on stolen box still exposes
-  it), and `<node>.enc.yaml` ships to the node — so a stored passphrase means a
-  stolen box unlocks its own backups, while you still type it at every reboot (worst
-  of both). Keep it OFFLINE (password manager + a second physical copy); typed at
+- **Never put `zfs-passphrase` in ANY sops file.** The node's age key (a DEDICATED
+  age identity, `private-keys/<node>-age.txt`, seeded to `/var/lib/sops-nix/key.txt`)
+  lives on the root (unencrypted ext4 on B/C; on node-A the root is LUKS/TPM but is
+  auto-unlocked at runtime, so a powered-on stolen box still exposes it), and
+  `<node>.enc.yaml` ships to the node — so a stored passphrase means a stolen box
+  unlocks its own backups, while you still type it at every reboot (worst of both). Keep it OFFLINE (password manager + a second physical copy); typed at
   `fleet install` and each unlock. `keylocation=prompt` has **no recovery path**.
   Same for per-node root passwords: only the `$6$` hash goes in sops, the plaintext
   lives in the password manager.
@@ -158,8 +180,8 @@ The devcontainer ships nix (single-user, no daemon, flakes enabled — see
 `.devcontainer/Dockerfile`), so these run here:
 
 ```bash
-nix develop         # operator toolchain: sops/age/ssh-to-age/openssl/openssh/git
-                    # + deploy-rs, all pinned by flake.lock (flake.nix devShells)
+nix develop         # operator toolchain: sops/age (PUREGO — Rosetta-safe),
+                    # ssh-to-age/openssl/openssh/git + deploy-rs, pinned by flake.lock
 nix flake lock      # resolves nixpkgs/disko/sops-nix/deploy-rs/nixos-anywhere/lanzaboote
 nix flake check     # evaluates all nixosConfigurations + deploy-rs schema checks
 ```
