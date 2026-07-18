@@ -24,7 +24,7 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
 ## Repo layout
 
 - `scripts/fleet` — **single workstation entrypoint** for the node lifecycle
-  (`new`/`install`/`deploy`/`rollback`/`status`/`secrets`/`config`); replaced the
+  (`new`/`install`/`finalize`/`deploy`/`rollback`/`unlock`/`status`/`secrets`/`config`); replaced the
   former `bootstrap-node` + `deploy-node`. `private-keys/` (gitignored) holds the
   fleet age key + per-node SSH host keys; `.fleet/` (gitignored) holds deploy markers.
 - `flake.nix` — inputs (incl. `lanzaboote` v0.4.2 for node-A Secure Boot);
@@ -34,7 +34,10 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
   hardware-config is wired (else `nix flake check` fails)
 - `modules/` — `base.nix` (ssh/nftables/`sysadmin`+root users/nix; `fleet.*` options),
   `sops.nix` (sops-nix wiring), `garage.nix` (`services.garage` + garage.toml, tailnet
-  listeners), `zfs-sanoid.nix` (ZFS + sanoid RO snapshot moat + autoScrub),
+  listeners), `garage-ops.nix` (storage-only: `garage-status`/`garage-unlock` on-box
+  operator commands — dataset lock/mount state + cluster `garage status`; unlock runs
+  the root steps via passwordless-wheel sudo, grants NO `zfs allow`), `zfs-sanoid.nix`
+  (ZFS + sanoid RO snapshot moat + autoScrub),
   `tailscale.nix`, `secureboot.nix` (node-A ONLY: lanzaboote signed UKIs + systemd
   stage-1 initrd + TPM2 LUKS unlock + the on-box enrollment runbook; gated on
   `fleet.secureBoot`), `workstation.nix` (node-A ONLY: ROOT-docker devcontainer host
@@ -46,8 +49,11 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
   {root, sysadmin home, docker}; encrypted HDD `dpool` = ALL of Garage,
   prompt-unlock over the mesh. Root is a `wpool` dataset, not a fixed partition),
   `disko-node-b.nix` (B: **unencrypted** ext4 root + encrypted npool + dpool),
-  `disko-storage.nix` (C: unencrypted root + single encrypted pool), `disko-gateway.nix`
-  (boot+root only, greenfield D rebuild). ZFS-native encrypted datasets use
+  `disko-node-c.nix` (C: its OWN file, SAME dual-disk shape as B — NVMe npool
+  ssd+meta / HDD dpool bulk; same AMD Lenovo box), `disko-storage.nix` (legacy
+  single-disk storage skeleton — no longer imported by A/B/C), `disko-gateway.nix`
+  (boot+root only, greenfield D rebuild). Both pools set `rootFsOptions.mountpoint =
+  "none"` (no empty `/npool`|`/dpool` root mounts). ZFS-native encrypted datasets use
   `keylocation=prompt` at runtime, `file://${fleet.zfsInstallKeyfile}` only under the
   `-install` variant; node-A's LUKS root additionally reads `fleet.luksInstallKeyfile`
   at install (its own passphrase, node-A only).
@@ -67,8 +73,12 @@ already in production** — reconfigure it **additively** (do not import
   nixos-anywhere + transient tmpfs passphrase feed → restores prompt-unlock; node-A
   prompts for TWO passphrases — see below), `fleet deploy <node>` (deploy-rs),
   `fleet finalize <node> root@host` (retry the post-install dpool unlock),
+  `fleet unlock <node> [root@host]` (feed the ZFS passphrase to a LOCKED node over
+  ssh — discovers every locked encryptionroot, load-key + mount + start garage;
+  self-contained, no garage-ops deploy needed; passphrase only on ssh stdin),
   `fleet config tailnet <name>` (slug only — `.ts.net` is appended), `fleet secrets`,
-  `fleet status`. ALL of these now need nix — sops/age come from the flake's
+  `fleet status` (readiness + lifecycle + a LIVE `garage` column that ssh-probes each
+  installed node's garage.service). ALL of these now need nix — sops/age come from the flake's
   **purego** builds (`nix run .#sops`/`.#age`), never a stock/mise binary (see the
   Rosetta note below).
 - **deploy-rs, not Flux** (`fleet deploy <node>` wraps it): `nix run .#deploy-rs -- .#node-a`. Magic
