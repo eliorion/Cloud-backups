@@ -85,6 +85,21 @@ mk() {
     *)  printf '%s·%s' "$D"   "$R" ;; # na / not-yet
   esac
 }
+# Live, best-effort: is garage.service active on the node? Probes over ssh
+# (root@<node>, relying on the ~/.ssh/config alias / MagicDNS the operator uses).
+# Short timeout so an offline or still-locked node cannot hang `fleet status`.
+# Echoes ok (active) / no (inactive|failed) / na (unreachable). Callers run this
+# in the background per node so the whole fleet is probed in parallel.
+probe_garage() {
+  local out
+  out="$(ssh -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new \
+           "root@$1" 'systemctl is-active garage.service' 2>/dev/null)" || true
+  case "$out" in
+    active) echo ok ;;
+    "")     echo na ;; # unreachable / down
+    *)      echo no ;; # inactive / failed
+  esac
+}
 ok()   { printf '%s✔%s %s\n' "$G" "$R" "$*"; }
 warn() { printf '%s⚠%s %s\n' "$Y" "$R" "$*"; }
 err()  { printf '%s✘%s %s\n' "$RED" "$R" "$*" >&2; }
@@ -762,11 +777,25 @@ cmd_status() {
   # --- per-node table. Each status column is 9 cells: a header "  %-7s" (2+7) and
   # a data cell "  <glyph>      " (2 + 1 glyph + 6 spaces). The glyph is one display
   # cell (mk), so headers and glyphs line up exactly. Prefix = 2+8+1+21 = 32. -----
-  local rule; rule="$(printf '─%.0s' $(seq 1 86))"
+  local rule; rule="$(printf '─%.0s' $(seq 1 95))"
   printf '\n  %s%-8s %-21s%s' "$B" 'NODE' 'ROLE' "$R"
-  local h; for h in agekey recip authkey commit install deploy; do printf '  %s%-7s%s' "$B" "$h" "$R"; done; printf '\n'
+  local h; for h in agekey recip authkey commit install deploy garage; do printf '  %s%-7s%s' "$B" "$h" "$R"; done; printf '\n'
   printf '  %s%s%s\n' "$D" "$rule" "$R"
-  local node type ts
+
+  # `garage` is a LIVE probe. Kick one off per installed node in the background so
+  # the whole fleet is checked in parallel (offline nodes cost one timeout, not N);
+  # non-installed nodes get 'na' with no ssh. Results land in $gdir/<node>.
+  local gdir node; gdir="$(mktemp -d)"
+  for node in "${nodes[@]}"; do
+    if [[ -f "$STATE_DIR/installed-$node" ]]; then
+      probe_garage "$node" >"$gdir/$node" &
+    else
+      echo na >"$gdir/$node"
+    fi
+  done
+  wait
+
+  local type ts
   for node in "${nodes[@]}"; do
     type="$(type_of "$node" 2>/dev/null || echo '?')"; ts="$SECRETS/$node.enc.yaml"
     printf '  %-8s %-21s' "$node" "$(type_short "$type")"
@@ -776,10 +805,14 @@ cmd_status() {
     printf '  %s      ' "$(committed "hosts/$node.nix" && mk ok || mk no)"
     printf '  %s      ' "$([[ -f "$STATE_DIR/installed-$node" ]] && mk ok || mk na)"
     printf '  %s      ' "$([[ -f "$STATE_DIR/deployed-$node" ]] && mk ok || mk na)"
+    printf '  %s      ' "$(mk "$(cat "$gdir/$node" 2>/dev/null || echo na)")"
     printf '\n'
   done
+  rm -rf "$gdir"
   printf '  %s%s  %s✓%s ready  %s✗%s missing  %s·%s not-yet%s\n' \
     "$D" 'legend:' "$G" "$D" "$RED" "$D" "$D" "$D" "$R"
+  printf '  %s%s  garage = LIVE ssh probe: %s✓%s active  %s✗%s down  %s·%s unreachable/not-installed%s\n' \
+    "$D" '       ' "$G" "$D" "$RED" "$D" "$D" "$D" "$R"
 }
 
 # ============================================================================= guide
