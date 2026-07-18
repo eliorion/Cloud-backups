@@ -96,6 +96,7 @@
         ./modules/tailscale.nix
         ./modules/garage.nix
         ./modules/zfs-sanoid.nix
+        ./modules/garage-ops.nix
       ];
 
       # THE source of truth for the fleet's nodes. `scripts/fleet` adds ONE line
