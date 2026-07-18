@@ -43,8 +43,9 @@ live-USB flow below as the fallback.
   So node-A has **TWO** human-held secrets (see [Why node-A has 2 passphrases](#why-node-a-has-2-passphrases-and-node-bc-have-1)); node-B/C have one.
 
 This **supersedes** the single-disk auto-unlock skeleton
-(`hosts/disko-storage.nix`, which now applies only to node-C until C is
-converted) for nodes A and B.
+(`hosts/disko-storage.nix`) for A, B **and C** — node-C now has its own
+`hosts/disko-node-c.nix` (same dual-disk npool+dpool shape as B). `disko-storage.nix`
+is legacy and no longer imported by any node.
 
 > Read order: **doc 09** (design/ADRs, the *why*) → **doc 10** (phased plan,
 > layout/peering/gateway/data-plane) → **doc 12** (node-B USB mechanics in full)
@@ -64,8 +65,16 @@ or use subcommands:
 ./scripts/fleet new    node-a                     # scaffold + secrets (idempotent; --force regens)
 ./scripts/fleet install node-a root@<installer-ip># REMOTE provision (nixos-anywhere)
 ./scripts/fleet deploy  node-a                    # apply a config change (deploy-rs + auto-rollback)
-./scripts/fleet status                            # readiness + lifecycle state per node
+./scripts/fleet unlock  node-b                    # feed the ZFS passphrase to a LOCKED node (post-reboot)
+./scripts/fleet status                            # readiness + lifecycle + LIVE garage.service column
 ```
+
+`fleet status`'s `garage` column ssh-probes each installed node: `✓` active,
+`✗` down, `·` unreachable/not-installed. A node showing `✗` after a reboot needs
+its data pool unlocked — `fleet unlock <node>` (prompts for the passphrase, then
+load-keys every locked pool + mounts + starts Garage). On the box itself the same
+job is `garage-unlock` (and `garage-status` for a local report), from `sysadmin`
+without typing sudo.
 
 | Command | Does (automated) | You still do |
 |---|---|---|
@@ -511,6 +520,15 @@ PCR 7 — keep it in the break-glass vault.
 
 ### A.6 Unlock the data pool + start Garage
 
+From the workstation (preferred — prompts for the passphrase, load-keys every
+locked pool, mounts, starts Garage):
+
+```bash
+./scripts/fleet unlock node-a               # or: ssh -t root@node-a garage-unlock
+```
+
+Or by hand on the box:
+
 ```bash
 sudo zfs load-key -a               # prompts ONCE — only dpool/garage is encrypted
 sudo zfs mount -a
@@ -759,7 +777,7 @@ prompt-unlock model (so docs 11/12 and the code agree):
   via sshd `Match User sysadmin`, ZFS ARC cap. Co-located with the DR Garage role.
 - `hosts/node-b.nix` + `disko-node-b.nix` + `node-b-hardware.nix` — **new/rewritten**
   per doc 12.
-- `hosts/node-c.nix` / `node-d.nix` — **unchanged**. node-C still imports the
-  single-disk `disko-storage.nix`; convert it to the dual-disk model (copy
-  node-A's HDD-`dpool` Garage layout) when you install it, or keep single-disk per
-  its hardware.
+- `hosts/node-c.nix` + `disko-node-c.nix` + `node-c-hardware.nix` — **new**. node-C
+  now imports its OWN dual-disk `disko-node-c.nix` (same npool+dpool shape as B,
+  same AMD Lenovo box) and reuses `node-b-hardware.nix`. Garage capacities match
+  node-A's ~75%-of-usable ratio (300G ssd / 700G hdd). `node-d.nix` — unchanged.
