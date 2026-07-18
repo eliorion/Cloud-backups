@@ -26,6 +26,10 @@
 #                               firewall/tailscaled change). First push warns: no
 #                               rollback baseline yet — keep a console reachable.
 #   fleet rollback <node>       Manually roll the node back one generation (ssh).
+#   fleet unlock  <node> [root@host]
+#                               Feed the ZFS passphrase to a locked node over ssh
+#                               (load-key every locked pool + mount + start garage).
+#                               Use when `fleet status` shows garage down post-reboot.
 #   fleet status  [<node>]      Readiness + lifecycle state per node.
 #   fleet secrets               Edit / verify / git-add the encrypted secrets.
 #   fleet config tailnet <name> Set the MagicDNS tailnet in flake.nix.
@@ -674,6 +678,53 @@ done' || true
   finalize_storage "$target"
 }
 
+# ============================================================================= unlock
+# Feed the ZFS passphrase to a node whose data pool is LOCKED (garage down after a
+# reboot — keylocation=prompt stores no key on the box, doc 12). Reads the
+# passphrase locally (hidden prompt, or one line from stdin for scripting), then
+# over ssh discovers every locked encryptionroot on the node and loads the key on
+# each with that ONE passphrase (npool/garage + dpool/garage share it), `zfs
+# mount -a`, and starts garage. Self-contained: does NOT require the garage-ops
+# module (garage-unlock) to be deployed yet. The passphrase travels only on ssh
+# stdin — never argv/env, so it never lands in the process table.
+cmd_unlock() {
+  [[ $# -ge 1 ]] || die "usage: fleet unlock <node> [root@host]"
+  local node target; node="$(canon "$1")"
+  target="${2:-root@$node}"; [[ "$target" == *@* ]] || target="root@$target"
+  need ssh
+  is_storage "$node" || die "$node is not a storage node — nothing to unlock."
+  local pass
+  if [[ -t 0 ]]; then
+    read -rsp "ZFS passphrase for $node: " pass; echo
+  else
+    IFS= read -r pass || true
+  fi
+  [[ -n "$pass" ]] || die "no passphrase given."
+  hdr "unlock $node -> $target"
+  # Runs as root (default root@ target), so no sudo. Single-quoted so $vars expand
+  # ON THE NODE. Reads the passphrase from stdin line 1, loads every LOCKED
+  # encryptionroot, mounts, starts garage, prints the result.
+  local remote='set -eu
+IFS= read -r PASS
+n=0
+for r in $(zfs get -H -o value encryptionroot 2>/dev/null | sort -u); do
+  [ "$r" = - ] && continue
+  [ "$(zfs get -H -o value keystatus "$r")" = available ] && continue
+  printf "%s" "$PASS" | zfs load-key "$r"
+  echo ">> unlocked $r"
+  n=$((n+1))
+done
+if [ "$n" = 0 ]; then echo ">> nothing was locked"; fi
+zfs mount -a
+systemctl start garage.service
+echo ">> garage.service: $(systemctl is-active garage.service || true)"'
+  if printf '%s\n' "$pass" | ssh -o BatchMode=yes -o ConnectTimeout=8 "$target" "$remote"; then
+    ok "unlock finished on $node."
+  else
+    die "unlock failed on $node (wrong passphrase, or pool not imported — try: fleet finalize $node $target)."
+  fi
+}
+
 cmd_deploy() {
   [[ $# -ge 1 ]] || die "usage: fleet deploy <node> [-- <extra deploy-rs args>]"
   local node; node="$(canon "$1")"; shift
@@ -1077,6 +1128,7 @@ cmd_menu() {
     6) secrets          edit / verify / commit
     7) config tailnet   set MagicDNS tailnet
     8) guide <node>     on-box fallback runbook
+    9) unlock <node>    feed ZFS passphrase to a locked node
     q) quit
 EOF
     local c; c="$(ask 'choice')"
@@ -1089,6 +1141,7 @@ EOF
       6) cmd_secrets || true;;
       7) cmd_config tailnet "$(ask 'tailnet name')" || true; pause;;
       8) cmd_guide "$(ask 'node')" || true; pause;;
+      9) cmd_unlock "$(ask 'node')" || true; pause;;
       q|Q|"") echo "bye."; return 0;;
       *) warn "unknown choice"; pause;;
     esac
@@ -1104,6 +1157,7 @@ main() {
     finalize) shift; cmd_finalize "$@";;
     deploy)   shift; cmd_deploy "$@";;
     rollback) shift; cmd_rollback "$@";;
+    unlock)   shift; cmd_unlock "$@";;
     status)   shift; cmd_status "$@";;
     secrets)  shift; cmd_secrets "$@";;
     config)   shift; cmd_config "$@";;
