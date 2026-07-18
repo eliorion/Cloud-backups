@@ -45,7 +45,7 @@
     zfsAutoUnlock = false; # prompt-unlock; no passphrase on box
 
     # TODO operator: node-B's tailscale0 overlay IP — set AFTER first join (doc 12 §7).
-    tailscaleIp = "100.64.0.11";
+    tailscaleIp = "100.122.210.124";
 
     # TODO operator: LAN subnet this proxy advertises (scraper-egress role),
     # e.g. [ "192.168.1.0/24" ]. Leave [] until you wire the proxy route.
@@ -53,14 +53,18 @@
 
     # Garage spans NVMe (ssd) + HDD. Capacities ≈ usable space, tune after
     # `zpool list`. sanoid snapshots BOTH data pools (the moat).
+    # Matches node-A's ~75%-of-usable ratio so each pool keeps ~25% headroom for
+    # garage/meta + 90 days of sanoid snapshots (the moat — node-a.nix:96-101).
+    # Previous 400G/900G advertised ~99%/~97% of the pools, starving snapshots.
+    # Nominal usable: npool ≈ 405 GiB, dpool ≈ 931 GiB. Retune after `zpool list`.
     dataDirs = [
       {
         path = "/srv/garage/data-ssd";
-        capacity = "400G";
+        capacity = "300G"; # ~75% of npool (meta + snapshots take the rest)
       }
       {
         path = "/srv/garage/data-hdd";
-        capacity = "900G";
+        capacity = "700G"; # matches node-A's HDD (700G of ~931 GiB)
       }
     ];
     sanoidDatasets = [
