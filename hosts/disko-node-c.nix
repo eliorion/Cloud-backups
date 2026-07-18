@@ -76,6 +76,9 @@ in
         type = "zpool";
         mode = "";
         rootFsOptions = {
+          # Inert container — suppress the empty /npool|/dpool root mount (node-A
+          # parity, hosts/disko-node-a.nix). Children carry explicit mountpoints.
+          mountpoint = "none";
           compression = "zstd";
           "com.sun:auto-snapshot" = "false"; # sanoid owns snapshots
           acltype = "posixacl";
@@ -117,6 +120,9 @@ in
         type = "zpool";
         mode = "";
         rootFsOptions = {
+          # Inert container — suppress the empty /npool|/dpool root mount (node-A
+          # parity, hosts/disko-node-a.nix). Children carry explicit mountpoints.
+          mountpoint = "none";
           compression = "zstd";
           "com.sun:auto-snapshot" = "false";
           acltype = "posixacl";
