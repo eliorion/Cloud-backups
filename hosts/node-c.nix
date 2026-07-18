@@ -4,7 +4,7 @@
 {
   imports = [
     ./disko-storage.nix
-    # TODO operator: ./node-c-hardware.nix (generated at install)
+    ./node-c-hardware.nix # same hardware as node-B (reuses node-b-hardware.nix)
   ];
 
   networking.hostName = "node-c";
