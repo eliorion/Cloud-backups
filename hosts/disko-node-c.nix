@@ -26,7 +26,7 @@ in
       # --- NVMe 500GB: ESP + ext4 root + npool ------------------------------
       nvme = {
         type = "disk";
-        device = "/dev/nvme0n1"; # TODO operator: confirm with `lsblk`
+        device = "/dev/sdb"; # TODO operator: confirm with `lsblk`
         content = {
           type = "gpt";
           partitions = {
