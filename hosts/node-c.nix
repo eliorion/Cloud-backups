@@ -1,7 +1,7 @@
 # hosts/node-c.nix — OFFSITE-2 storage + Tailscale scraper-egress proxy.
-# doc 09 §3, doc 10 Phase 2. SAME hardware as node-B (AMD Lenovo, NVMe 500GB +
+# doc 00 §3, doc 01 Phase 2. SAME hardware as node-B (AMD Lenovo, NVMe 500GB +
 # HDD 1TB), dual-disk npool + dpool via its OWN disko-node-c.nix; different
-# zone/IP/hostId. Installed INTERACTIVELY from a NixOS live USB (doc 12 / doc 13).
+# zone/IP/hostId. Installed INTERACTIVELY from a NixOS live USB (doc 03 / doc 04).
 { ... }:
 {
   imports = [
@@ -71,7 +71,7 @@
     ];
   };
 
-  # ⚠️ Same offsite whole-box-theft boot-trust note as node-b (doc 09 §7).
+  # ⚠️ Same offsite whole-box-theft boot-trust note as node-b (doc 00 §7).
 
-  # Layout: garage layout assign <id-C> -z offsite-2 -c <bytes>  (doc 10 P2)
+  # Layout: garage layout assign <id-C> -z offsite-2 -c <bytes>  (doc 01 P2)
 }

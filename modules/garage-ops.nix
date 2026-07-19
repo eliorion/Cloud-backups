@@ -1,5 +1,5 @@
 # modules/garage-ops.nix — operator convenience for the manual prompt-unlock gate
-# (doc 12/13). Two commands on every STORAGE node:
+# (doc 03/04). Two commands on every STORAGE node:
 #
 #   garage-status  — is the cluster online, and does THIS node need unlocking?
 #                    Prints each encrypted dataset's keystatus + garage.service

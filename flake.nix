@@ -1,10 +1,10 @@
 {
   # garage-fleet — standalone NixOS fleet for the geo-distributed Garage backup
-  # cluster (documentations/09 §3, ADR-1/-2/-4; documentations/10 Phase 0/1).
+  # cluster (documentations/00 §3, ADR-1/-2/-4; documentations/01 Phase 0/1).
   #
   # This is a SEPARATE TRUST DOMAIN from the prod Talos cluster: different OS
   # (NixOS, not Talos), different identities (its own sops-nix age keys, NOT the
-  # cluster PKI), different network posture, no shared etcd (doc 09 §2). It is
+  # cluster PKI), different network posture, no shared etcd (doc 00 §2). It is
   # NOT joined to prod and is NOT a second Kubernetes cluster (ADR-1).
   #
   # Deployed via deploy-rs (NOT Flux). deploy-rs is chosen over colmena for its
@@ -14,7 +14,7 @@
   # ⚠️ flake.lock IS committed and must stay tracked — a flake's source is its
   #    git-tracked files, so a gitignored lock is invisible to nix and every input
   #    silently floats to upstream HEAD. See README.
-  description = "Garage backup fleet — standalone NixOS + ZFS (doc 09/10)";
+  description = "Garage backup fleet — standalone NixOS + ZFS (doc 00/01)";
 
   inputs = {
     # Pinned to a stable channel (25.05-era). Renovate/operator bumps this; the
@@ -121,7 +121,7 @@
         node-a = ./hosts/node-a.nix;
         node-b = ./hosts/node-b.nix;
         node-c = ./hosts/node-c.nix;
-        # node-d is ALREADY IN PRODUCTION and reconfigured ADDITIVELY (doc 10
+        # node-d is ALREADY IN PRODUCTION and reconfigured ADDITIVELY (doc 01
         # Phase 3): hosts/node-d.nix imports no disko and has no hardware-config
         # yet, so it defines no root fileSystem and would make `nix flake check`
         # fail. Re-enable it here once its real hardware-config is wired (uncomment
@@ -158,7 +158,7 @@
       # ⚠️ magic-rollback only protects you once a PRIOR generation was also
       #    deployed by deploy-rs. The first push after nixos-anywhere has no canary
       #    baseline — do that first reachable-config deploy with console /
-      #    initrd-SSH fallback available (ADR-4 caveat a, doc 10 P1).
+      #    initrd-SSH fallback available (ADR-4 caveat a, doc 01 P1).
       nixosConfigurations =
         lib.mapAttrs (_name: mod: mkSystem [ mod ]) hosts
         // lib.concatMapAttrs (name: mod: {

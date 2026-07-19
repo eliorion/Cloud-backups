@@ -1,4 +1,4 @@
-# hosts/disko-node-c.nix — node-C (offsite-2), interactive USB install (doc 12).
+# hosts/disko-node-c.nix — node-C (offsite-2), interactive USB install (doc 03).
 # SAME hardware as node-B (AMD Lenovo, NVMe 500GB + HDD 1TB): NVMe = ESP +
 # UNENCRYPTED ext4 root + encrypted `npool` (meta + ssd data); HDD = encrypted
 # `dpool` (bulk data). Its OWN file (not shared with node-B) so each node's device
@@ -7,7 +7,7 @@
 # format, and you re-enter it post-boot to unlock (never stored).
 #
 # ⚠️ disko create-mode DESTROYS both disks. Only ever run on a node BEFORE it
-#    holds backups (doc 10 risk register).
+#    holds backups (doc 01 risk register).
 { config, ... }:
 let
   # keylocation="prompt" at runtime (the moat); a tmpfs file:// path ONLY during

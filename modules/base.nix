@@ -1,7 +1,7 @@
-# modules/base.nix — host hardening shared by every fleet node (doc 09 ADR-2,
-# doc 10 Phase 1 "hardening.nix"). SSH hardening, nftables firewall trusting
+# modules/base.nix — host hardening shared by every fleet node (doc 00 ADR-2,
+# doc 01 Phase 1 "hardening.nix"). SSH hardening, nftables firewall trusting
 # only the tailnet + ssh, users, bounded boot generations, flakes, no
-# auto-upgrade (atomic deploys come from deploy-rs, doc 09 ADR-4).
+# auto-upgrade (atomic deploys come from deploy-rs, doc 00 ADR-4).
 {
   config,
   lib,
@@ -13,7 +13,7 @@
     # This node's tailscale0 overlay IP. services.tailscale does NOT export the
     # assigned 100.x address at eval time, so Garage's listeners (modules/
     # garage.nix) must read it from here — set per host in hosts/*.nix
-    # (doc 10 Phase 1 garage.nix skeleton note).
+    # (doc 01 Phase 1 garage.nix skeleton note).
     tailscaleIp = lib.mkOption {
       type = lib.types.str;
       example = "100.64.0.10";
@@ -40,9 +40,9 @@
 
     # true  = auto-unlock the encrypted data pool from a sops-persisted passphrase
     #         at boot (onsite convenience; weaker whole-box-theft story).
-    # false = prompt-unlock post-boot via `zfs load-key` (offsite default, doc 12).
+    # false = prompt-unlock post-boot via `zfs load-key` (offsite default, doc 03).
     # Gates the sops `zfs-passphrase` secret (modules/sops.nix) and which unlock
-    # path hosts/disko-node-*.nix wires. See documentations/13 Phase 0.
+    # path hosts/disko-node-*.nix wires. See documentations/04 Phase 0.
     zfsAutoUnlock = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -106,7 +106,7 @@
       ];
     };
     # No automatic upgrades — convergence is an explicit, atomic `deploy-rs`
-    # push with magic-rollback (doc 09 ADR-4). Drift/auto-reboots would defeat
+    # push with magic-rollback (doc 00 ADR-4). Drift/auto-reboots would defeat
     # the OS-as-code property.
     system.autoUpgrade.enable = false;
     nix.gc = {
@@ -183,7 +183,7 @@
     # --- firewall: nftables, tailnet + ssh only ------------------------------
     # Every Garage listener binds tailscale0 only (modules/garage.nix); the
     # firewall trusting only tailscale0 is the host-side half of the network
-    # isolation moat layer (doc 09 §3/§7). Binding 0.0.0.0 with a loose firewall
+    # isolation moat layer (doc 00 §3/§7). Binding 0.0.0.0 with a loose firewall
     # would expose S3 beyond the tailnet and defeat the whole moat.
     networking.nftables.enable = true;
     networking.firewall = {

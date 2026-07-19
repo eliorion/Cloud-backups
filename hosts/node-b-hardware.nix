@@ -1,5 +1,5 @@
 # hosts/node-b-hardware.nix — Lenovo ThinkCentre M715q Tiny, AMD PRO A10-9700E.
-# Hand-written minimal module (doc 12 §1.4). Optional: regenerate on the box with
+# Hand-written minimal module (doc 03 §1.4). Optional: regenerate on the box with
 # `nixos-generate-config --root /mnt` and diff — this is correct for this hardware.
 { lib, modulesPath, ... }:
 {

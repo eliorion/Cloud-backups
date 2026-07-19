@@ -1,10 +1,10 @@
-# 14 — node-A secure install → deploy pipeline (LUKS + TPM + Secure Boot)
+# 05 — node-A secure install → deploy pipeline (LUKS + TPM + Secure Boot)
 
 The single ordered runbook for taking **node-A** from bare metal to a fully
 hardened, unattended-booting, encrypted onsite storage + workstation node. Every
 step says **what** you run and **why** it matters for security. node-A is the
 only node with an encrypted root + Secure Boot; node-B/node-C use the simpler
-prompt-unlock flow in [doc 13](13-node-a-b-install.md).
+prompt-unlock flow in [doc 04](04-node-a-b-install.md).
 
 > This doc is the *pipeline narrative*. The authoritative, terse enrollment steps
 > live next to the code in [`modules/secureboot.nix`](../modules/secureboot.nix);
@@ -344,4 +344,4 @@ runbook (rules 2–3).
 node-B and node-C have only the **ZFS** one: their root is unencrypted ext4, so
 there is no LUKS domain and no recovery secret. The passphrase count equals the
 number of encryption domains that need a human-held secret — see
-[doc 13 § Why node-A has 2 passphrases](13-node-a-b-install.md#why-node-a-has-2-passphrases-and-node-bc-have-1).
+[doc 04 § Why node-A has 2 passphrases](04-node-a-b-install.md#why-node-a-has-2-passphrases-and-node-bc-have-1).
