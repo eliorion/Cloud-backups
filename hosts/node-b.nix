@@ -41,6 +41,7 @@
   fleet = {
     role = "storage";
     zone = "offsite-1";
+    garageCapacity = "1000GB"; # advertised to the Garage layout (fleet layout apply)
     proxyNode = true;
     zfsAutoUnlock = false; # prompt-unlock; no passphrase on box
 
