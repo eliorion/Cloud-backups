@@ -20,11 +20,18 @@
 #                               installer's RAM (--disk-encryption-keys), seeds the
 #                               host key (--extra-files), then restores
 #                               keylocation=prompt. DESTROYS the target's disks.
-#   fleet deploy  <node> [-- ...]
+#   fleet deploy  <node> [--detached] [-- ...]
 #                               Apply a config change to an already-installed node
 #                               with deploy-rs (magic-rollback auto-reverts a bad
 #                               firewall/tailscaled change). First push warns: no
 #                               rollback baseline yet — keep a console reachable.
+#                               --detached: activate over the tailnet WITHOUT a
+#                               held ssh (switch runs under systemd/PID1, so it
+#                               survives the tailscaled restart it triggers). This
+#                               is the NO-LAN path for tailscale version/config
+#                               changes on an offsite node — the one class that
+#                               breaks a normal (held-ssh) deploy. No magic-rollback
+#                               on this path (see the warning it prints).
 #   fleet rollback <node>       Manually roll the node back one generation (ssh).
 #   fleet unlock  <node> [root@host]
 #                               Feed the ZFS passphrase to a locked node over ssh
@@ -726,13 +733,22 @@ echo ">> garage.service: $(systemctl is-active garage.service || true)"'
 }
 
 cmd_deploy() {
-  [[ $# -ge 1 ]] || die "usage: fleet deploy <node> [-- <extra deploy-rs args>]"
+  [[ $# -ge 1 ]] || die "usage: fleet deploy <node> [--detached] [-- <extra deploy-rs args>]"
   local node; node="$(canon "$1")"; shift
+  local detached=0
+  while [[ $# -gt 0 && "$1" != -- ]]; do
+    case "$1" in
+      --detached) detached=1; shift;;
+      *) die "unknown deploy option: $1 (deploy-rs args go after --).";;
+    esac
+  done
   local extra=(); [[ "${1:-}" == -- ]] && { shift; extra=("$@"); }
   require_nix deploy
   flake_has_node "$node" || die "$node is not wired into flake.nix (hosts entry missing/commented) — wire it before deploying."
   committed "hosts/$node.nix" || warn "hosts/$node.nix not committed — deploy-rs builds from git-tracked files only."
   tailnet_set || die "tailnet still '<tailnet>' in flake.nix — set it: fleet config tailnet <name>"
+
+  if [[ $detached == 1 ]]; then deploy_detached "$node"; return; fi
 
   hdr "deploy $node (deploy-rs, magic-rollback)"
   if [[ ! -f "$STATE_DIR/deployed-$node" ]]; then
@@ -746,6 +762,72 @@ cmd_deploy() {
   ( cd "$ROOT" && nix run ".#deploy-rs" -- ".#${node}" "${extra[@]}" )
   mkdir -p "$STATE_DIR"; : > "$STATE_DIR/deployed-$node"
   ok "deployed $node (rollback baseline now recorded for next time)."
+}
+
+# No-LAN activation for the one deploy class that breaks a held-ssh deploy:
+# tailscale version/config changes (the switch restarts tailscaled, which drops the
+# very tailnet ssh a normal deploy-rs run rides for its magic-rollback confirm →
+# activation dies mid-switch + rollback, and a version rollback then DOWNGRADES
+# tailscaled into a state file it cannot parse, bricking garage's RPC bind).
+#
+# Instead: build the closure locally, `nix copy` it to the node over the tailnet,
+# then launch `switch-to-configuration switch` as a transient systemd unit (owned by
+# PID 1). systemd-run returns immediately, so when the switch restarts tailscaled and
+# THIS ssh drops, the switch keeps running to completion under systemd. The node
+# always moves FORWARD (never the downgrade rollback), so a version bump self-heals:
+# tailscaled comes back on the new version, migrates its state forward, rejoins the
+# tailnet, garage rebinds. We then poll until it is reachable again and report.
+#
+# Trade-off: there is NO auto-rollback here. A version bump reconnects on its own
+# (safe), but a BROKEN tailscale *config* change may never rejoin — with no LAN that
+# strands the node. Use --detached for version bumps freely; for config changes keep
+# an out-of-band recovery path.
+deploy_detached() {
+  local node="$1"; need nix; need ssh
+  local host; host="$(deploy_host "$node")"
+  hdr "deploy $node (--detached: systemd-owned switch over the tailnet, no LAN)"
+  warn "NO magic-rollback on this path. A tailscale VERSION bump reconnects on its own"
+  warn "(safe); a broken tailscale CONFIG change may never rejoin and, with no LAN,"
+  warn "would strand $node. Use freely for version bumps; keep a recovery path for config."
+  confirm "detached-deploy $node ($host)?" || { note "aborted."; return; }
+
+  note "building $node's system closure locally..."
+  local sys
+  sys="$(cd "$ROOT" && nix build --no-link --print-out-paths \
+        ".#nixosConfigurations.${node}.config.system.build.toplevel")" \
+    || die "build failed."
+  note "closure: $sys"
+
+  note "copying closure to $node over the tailnet ($host)..."
+  ( cd "$ROOT" && nix copy --to "ssh://root@$host" "$sys" ) \
+    || die "nix copy failed — is $host reachable on the tailnet?"
+
+  note "activating DETACHED (switch runs under systemd, survives the tailscaled restart)..."
+  # systemd-run launches the switch and returns at once; --collect reaps the transient
+  # unit when it finishes. The switch (not this ssh) owns the tailscaled restart.
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "root@$host" \
+    "nix-env -p /nix/var/nix/profiles/system --set '$sys' && \
+     systemd-run --collect --unit=fleet-deploy-switch --property=Type=oneshot \
+       '$sys/bin/switch-to-configuration' switch" \
+    || die "failed to launch the detached switch on $node."
+
+  ok "switch launched on $node. tailscaled will restart; the tailnet drops briefly."
+  note "waiting for $node to rejoin the tailnet (up to ~200s)..."
+  local i
+  for i in $(seq 1 40); do
+    sleep 5
+    if ssh -o BatchMode=yes -o ConnectTimeout=6 "root@$host" true 2>/dev/null; then
+      ok "$node is reachable again."
+      ssh -o BatchMode=yes -o ConnectTimeout=6 "root@$host" \
+        'printf "  tailscale: %s\n" "$(tailscale version | head -1)"; \
+         printf "  garage.service: %s\n" "$(systemctl is-active garage.service)"' 2>/dev/null || true
+      mkdir -p "$STATE_DIR"; : > "$STATE_DIR/deployed-$node"
+      note "if garage is not active, its data pool is locked — fleet unlock $node."
+      return 0
+    fi
+  done
+  die "$node did NOT rejoin within ~200s. It may still be applying, or the new tailscale
+config is broken. Recover over LAN/console and check: journalctl -u fleet-deploy-switch -u tailscaled."
 }
 
 cmd_rollback() {
@@ -1123,7 +1205,7 @@ cmd_menu() {
     1) new <node>       scaffold + secrets
     2) install <node>   provision (nixos-anywhere)
     3) finalize <node>  retry post-install unlock (ssh)
-    4) deploy <node>    apply config (deploy-rs + rollback)
+    4) deploy <node>    apply config (deploy-rs + rollback; asks --detached for no-LAN tailscale changes)
     5) rollback <node>  previous generation
     6) secrets          edit / verify / commit
     7) config tailnet   set MagicDNS tailnet
@@ -1136,7 +1218,8 @@ EOF
       1) cmd_new   "$(ask 'node (a/b/c/d or node-x)')" ${TY:+--type "$TY"} || true; pause;;
       2) local n t; n="$(ask 'node')"; t="$(ask 'target (root@host)')"; cmd_install "$n" "$t" || true; pause;;
       3) local n t; n="$(ask 'node')"; t="$(ask 'target (root@host)')"; cmd_finalize "$n" "$t" || true; pause;;
-      4) cmd_deploy   "$(ask 'node')" || true; pause;;
+      4) local dn df; dn="$(ask 'node')"; df="$(ask 'detached (no-LAN tailscale change)? y/N')"
+         case "$df" in y|Y) cmd_deploy "$dn" --detached;; *) cmd_deploy "$dn";; esac || true; pause;;
       5) cmd_rollback "$(ask 'node')" || true; pause;;
       6) cmd_secrets || true;;
       7) cmd_config tailnet "$(ask 'tailnet name')" || true; pause;;
