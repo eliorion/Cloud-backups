@@ -3,9 +3,9 @@
 Step-by-step runbook to bring up the **first Garage backup-fleet node** by
 building a NixOS disk image on your workstation, `dd`-ing it onto the NVMe, and
 plugging that NVMe into the box — instead of the `nixos-anywhere`-over-SSH flow
-in `documentations/10` Phase 1/2.
+in `documentations/01` Phase 1/2.
 
-Read `documentations/09` (the *why*) and `documentations/10` (the phased plan
+Read `documentations/00` (the *why*) and `documentations/01` (the phased plan
 this specialises) first. This guide is the concrete command-by-command build for
 **node-B specifically**, with every file to create/modify shown inline at the
 step it is needed. All paths are in the `garage-fleet/` repo unless tagged
@@ -63,7 +63,7 @@ Search the files below for `TODO operator` and `<...>`. Decide these first:
 
 ---
 
-## 1. Secrets — separate trust domain (doc 10 Phase 0)
+## 1. Secrets — separate trust domain (doc 01 Phase 0)
 
 Do this on your **workstation** with `nix`, `sops`, `age`, `ssh-to-age` available.
 
@@ -138,7 +138,7 @@ cp secrets/node-tailscale.sops.yaml.example secrets/node-b-tailscale.sops.yaml
 sops -e -i secrets/node-b-tailscale.sops.yaml
 ```
 
-### 1.5 Tailscale ACL (admin console, deny-by-default — doc 09 §3)
+### 1.5 Tailscale ACL (admin console, deny-by-default — doc 00 §3)
 
 - `tag:garage ↔ tag:garage` on `tcp:3900,3901,3903`
 - `tag:k8s → tag:garage` on **`tcp:3900` only** (never 3901/3903)
@@ -161,11 +161,11 @@ and cannot prompt for the passphrase, so we create them by hand at first boot
 
 ```nix
 # hosts/disko-node-b.nix — single-NVMe layout for node-B, baked into the flashed
-# image (documentations/11). ESP + UNENCRYPTED ext4 root + pool `npool`.
+# image (documentations/02). ESP + UNENCRYPTED ext4 root + pool `npool`.
 #
 # Root is intentionally unencrypted so the box boots to multi-user (sshd +
 # tailscale up) on its own; only the Garage DATA datasets on npool are encrypted
-# and are unlocked POST-BOOT over the tailnet (doc 11 "unlock model"). The
+# and are unlocked POST-BOOT over the tailnet (doc 02 "unlock model"). The
 # encrypted datasets npool/garage{,/meta,/data-ssd} are created by hand at first
 # boot with keylocation=prompt — NOT declared here, because diskoImages builds in
 # a non-interactive VM and cannot prompt.
@@ -234,7 +234,7 @@ Standalone disko config for the 1 TB HDD. Run **on the booted node** (Step 4.4)
 
 ```nix
 # hosts/disko-node-b-hdd.nix — the 1 TB SATA HDD on node-B, formatted POST-BOOT
-# (documentations/11 Step 4.4), NOT part of the flashed image. Exposed as a
+# (documentations/02 Step 4.4), NOT part of the flashed image. Exposed as a
 # standalone diskoConfigurations.node-b-hdd in flake.nix and applied with
 #   disko --mode destroy,format,mount --flake .#node-b-hdd
 # Pool only; the encrypted dpool/garage/data-hdd dataset is created by hand at
@@ -275,7 +275,7 @@ after first boot with `nixos-generate-config` if you like.
 # hosts/node-b-hardware.nix — hardware config for the Lenovo M715q Tiny
 # (AMD A10-9700E). Minimal generic set good enough to boot the flashed image;
 # regenerate with `nixos-generate-config --show-hardware-config` on the booted
-# node to refine if needed (documentations/11).
+# node to refine if needed (documentations/02).
 { lib, modulesPath, ... }:
 {
   imports = [ (modulesPath + "/installer/scan/not-detected.nix") ];
@@ -311,7 +311,7 @@ ZFS pools, and makes Garage wait for the post-boot unlock.
 
 ```nix
 # hosts/node-b.nix — OFFSITE-1 storage + Tailscale scraper-egress proxy, built by
-# flashing a prebuilt image to NVMe (documentations/11). Single NVMe (boot + meta
+# flashing a prebuilt image to NVMe (documentations/02). Single NVMe (boot + meta
 # + ssd data) + a 1 TB HDD added post-boot for bulk data. Prompt-unlock ZFS:
 # root is unencrypted, the Garage data pool is unlocked post-boot over the tailnet.
 { lib, ... }:
@@ -343,7 +343,7 @@ ZFS pools, and makes Garage wait for the post-boot unlock.
   };
 
   # Import the ZFS pools at boot. Datasets stay LOCKED until the post-boot
-  # `zfs load-key` (doc 11 unlock model). dpool added after the HDD exists.
+  # `zfs load-key` (doc 02 unlock model). dpool added after the HDD exists.
   boot.zfs.extraPools = [ "npool" ];
 
   # --- bootloader: GRUB removable for a FLASHED image ----------------------
@@ -364,7 +364,7 @@ ZFS pools, and makes Garage wait for the post-boot unlock.
 
   # Garage must not start until the encrypted data pool is unlocked + mounted
   # (set in modules/garage.nix via ConditionPathIsMountPoint). Until then it sits
-  # inactive — no crash loop. Unlock: see doc 11 "unlock model".
+  # inactive — no crash loop. Unlock: see doc 02 "unlock model".
 }
 ```
 
@@ -382,13 +382,13 @@ alongside the existing `tailscaleIp` / `zone` / `role`, add:
     hddData = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "Include the post-boot HDD pool in Garage data_dir + sanoid (doc 11).";
+      description = "Include the post-boot HDD pool in Garage data_dir + sanoid (doc 02).";
     };
 
     zfsAutoUnlock = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "true = sops-baked passphrase auto-unlock; false = keylocation=prompt (offsite, doc 11).";
+      description = "true = sops-baked passphrase auto-unlock; false = keylocation=prompt (offsite, doc 02).";
     };
 
     advertiseRoutes = lib.mkOption {
@@ -400,7 +400,7 @@ alongside the existing `tailscaleIp` / `zone` / `role`, add:
     sanoidDatasets = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ "bpool/garage" ];
-      description = "ZFS datasets sanoid snapshots (the moat). Per-host (doc 11 uses npool/dpool).";
+      description = "ZFS datasets sanoid snapshots (the moat). Per-host (doc 02 uses npool/dpool).";
     };
 ```
 
@@ -422,12 +422,12 @@ becomes `data-ssd` (single) or a multi-dir list with capacities once `hddData`;
 Garage waits for the unlocked mount via `ConditionPathIsMountPoint`.
 
 ```nix
-# modules/garage.nix — the Garage object-store service (doc 09 §5, doc 11).
+# modules/garage.nix — the Garage object-store service (doc 00 §5, doc 02).
 # Every listener binds the node's tailscale0 overlay IP only, never 0.0.0.0.
 #
 # Storage nodes (A/B/C): metadata on /srv/garage/meta, object data on
 # /srv/garage/data-ssd (+ /srv/garage/data-hdd once fleet.hddData). Those mounts
-# are ENCRYPTED ZFS datasets unlocked post-boot (doc 11), so garage is gated with
+# are ENCRYPTED ZFS datasets unlocked post-boot (doc 02), so garage is gated with
 # ConditionPathIsMountPoint and stays idle until you unlock + start it.
 # Gateway (D): capacity 0, tiny local dirs.
 {
@@ -479,7 +479,7 @@ in
         rpc_public_addr = "${tsIp}:3901";
         rpc_secret_file = config.sops.secrets."rpc_secret".path;
 
-        # Single node for the node-B bring-up; add peers in doc 10 Phase 2.
+        # Single node for the node-B bring-up; add peers in doc 01 Phase 2.
         bootstrap_peers = [ ];
 
         s3_api = {
@@ -502,7 +502,7 @@ in
     ];
 
     # Storage: don't start garage until the encrypted data pool is unlocked +
-    # mounted (doc 11). Stays inactive — not crash-looping — while locked.
+    # mounted (doc 02). Stays inactive — not crash-looping — while locked.
     systemd.services.garage = lib.mkIf (!isGateway) {
       unitConfig.ConditionPathIsMountPoint = [ metaDir ssdData ];
       after = [ "zfs-mount.service" ];
@@ -561,7 +561,7 @@ Replace the hardcoded `datasets."bpool/garage"` block with one driven by
 In the `outputs` attrset (next to `nixosConfigurations`), add:
 
 ```nix
-      # Standalone disko config for node-B's post-boot HDD (doc 11 Step 4.4):
+      # Standalone disko config for node-B's post-boot HDD (doc 02 Step 4.4):
       #   disko --mode destroy,format,mount --flake .#node-b-hdd
       diskoConfigurations.node-b-hdd = import ./hosts/disko-node-b-hdd.nix;
 ```
@@ -679,7 +679,7 @@ sudo chown -R garage:garage /srv/garage
 ```
 
 > Confirm the moat invariant immediately: `zfs allow npool/garage` must show the
-> `garage` user NOWHERE (doc 09 §7). Never `zfs allow garage … destroy/rollback`.
+> `garage` user NOWHERE (doc 00 §7). Never `zfs allow garage … destroy/rollback`.
 
 ### 4.3 First deploy-rs baseline (arms magic rollback)
 
@@ -801,13 +801,13 @@ sudo garage key delete --yes smoke
 - **Every reboot (manual unlock):** `ssh ops@node-b… ; sudo zfs load-key -a && sudo zfs mount -a && sudo systemctl start garage`.
 - **Config change:** edit the nix, `deploy-rs .#node-b` (magic rollback auto-reverts a bad push).
 - **Passphrase:** never stored on the box; keep two offline copies. To change it: `zfs change-key npool/garage` (and `dpool/garage`).
-- **Adding node-A / node-C / node-D + the data-plane backup jobs:** continue with `documentations/10` Phases 2–8.
+- **Adding node-A / node-C / node-D + the data-plane backup jobs:** continue with `documentations/01` Phases 2–8.
 
 ---
 
-## 7. Why this differs from doc 10 Phase 1/2 (at a glance)
+## 7. Why this differs from doc 01 Phase 1/2 (at a glance)
 
-| doc 10 (nixos-anywhere) | doc 11 (this guide, node-B) |
+| doc 01 (nixos-anywhere) | doc 02 (this guide, node-B) |
 |---|---|
 | Boots a rescue image, installs over SSH | Flash a prebuilt image to NVMe, plug in |
 | 2-disk single pool, auto-unlock (`file://` key) | NVMe (boot+meta+ssd) + HDD (bulk); **prompt-unlock** |
@@ -815,6 +815,6 @@ sudo garage key delete --yes smoke
 | `--extra-files` seeds the SSH host key | host key injected into the image via loop-mount (Step 3.2) |
 | systemd-boot | GRUB removable (`/EFI/BOOT/BOOTX64.EFI`) for `dd`'d media |
 
-See `documentations/09` for the design rationale and `documentations/10` for the
+See `documentations/00` for the design rationale and `documentations/01` for the
 full multi-node + data-plane plan.
 ```

@@ -1,15 +1,15 @@
 # hosts/disko-storage.nix — declarative disk + ZFS layout for STORAGE nodes
-# (A/B/C). Imported by node-a/-b/-c (doc 09 §5/§7, doc 10 Phase 1 disko skeleton).
+# (A/B/C). Imported by node-a/-b/-c (doc 00 §5/§7, doc 01 Phase 1 disko skeleton).
 #
 # One ZFS pool `bpool` with the encryption boundary at `bpool/garage` and
 # separate meta (small recordsize) + data (large recordsize) datasets on which
 # Garage stores metadata + data — node-local ZFS, NOT Longhorn, to break the
-# backing-up-the-thing-you-back-up circular dependency (doc 09 §5).
+# backing-up-the-thing-you-back-up circular dependency (doc 00 §5).
 #
 # ⚠️ disko create-mode DESTROYS the target disk. Only ever run nixos-anywhere on
-#    a node BEFORE it holds backups (doc 10 risk register).
+#    a node BEFORE it holds backups (doc 01 risk register).
 #
-# BOOT-TRUST CAVEAT (doc 09 §7, doc 10 Phase 1 boot-trust note):
+# BOOT-TRUST CAVEAT (doc 00 §7, doc 01 Phase 1 boot-trust note):
 #   keylocation = file://… + a sops-nix-persisted passphrase means the node
 #   AUTO-UNLOCKS at boot — the age identity that decrypts the passphrase lives
 #   on the same disk (derived from the on-disk SSH host key). So ZFS-at-rest
@@ -115,7 +115,7 @@ in
       datasets = {
         # Encryption boundary. Native aes-256-gcm (preferred over LUKS) so
         # `zfs send -w` ships still-encrypted ciphertext to an offsite vault
-        # (doc 09 §7). Trade-off: native encryption leaks pool-level metadata
+        # (doc 00 §7). Trade-off: native encryption leaks pool-level metadata
         # (dataset/snapshot names, sizes) — accepted for the raw-send property.
         "garage" = {
           type = "zfs_fs";
@@ -127,7 +127,7 @@ in
         };
         # Garage metadata (LMDB) — small recordsize. Size for LMDB + Garage
         # metadata snapshots, which can transiently need ~4x the DB size
-        # (doc 09 §11). Put on SSD where possible.
+        # (doc 00 §11). Put on SSD where possible.
         # ⚠️ `nofail` ALONE — never add "noauto". See the long note in
         # hosts/disko-node-a.nix: nofail stops a locked-at-boot dataset from failing
         # local-fs.target (which strands the node in emergency.target with no sshd —

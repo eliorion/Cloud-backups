@@ -1,5 +1,5 @@
 # hosts/node-b.nix — OFFSITE-1 storage + Tailscale scraper-egress proxy.
-# Installed INTERACTIVELY from a NixOS live USB (doc 12 / doc 13), NOT
+# Installed INTERACTIVELY from a NixOS live USB (doc 03 / doc 04), NOT
 # dd/nixos-anywhere. Dual-disk (NVMe npool + HDD dpool), prompt-unlock.
 { ... }:
 {
@@ -44,7 +44,7 @@
     proxyNode = true;
     zfsAutoUnlock = false; # prompt-unlock; no passphrase on box
 
-    # TODO operator: node-B's tailscale0 overlay IP — set AFTER first join (doc 12 §7).
+    # TODO operator: node-B's tailscale0 overlay IP — set AFTER first join (doc 03 §7).
     tailscaleIp = "100.122.210.124";
 
     # Cluster gossip: every OTHER node's `garage node id`. A (onsite) here; add

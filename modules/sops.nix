@@ -1,4 +1,4 @@
-# modules/sops.nix — sops-nix wiring for the fleet (doc 09 §8, doc 10 Phase 1).
+# modules/sops.nix — sops-nix wiring for the fleet (doc 00 §8, doc 01 Phase 1).
 #
 # Each node has a DEDICATED age key (age-keygen), private half in
 # private-keys/node-<x>-age.txt (gitignored), seeded at install to
@@ -9,7 +9,7 @@
 # ssh-to-age" scheme. That failed at boot: sops-nix's bundled ssh-to-age
 # conversion produced an identity that could not decrypt the secrets (recipient
 # matched, payload auth failed) even though the standalone ssh-to-age + sops CLI
-# could. A native age key sidesteps the conversion entirely. (doc 14, commit log.)
+# could. A native age key sidesteps the conversion entirely. (doc 05, commit log.)
 #
 # Secrets are decrypted at activation into /run/secrets/<name>, owned by their
 # consuming service, with restartUnits wired so rotation restarts the unit.
@@ -90,18 +90,18 @@ in
 
     # --- ZFS dataset passphrase (bpool/garage) — STORAGE nodes only -----------
     # This is what makes the documented "passphrase persisted via sops-nix per
-    # node, auto-unlock at boot" model (doc 09 §7, doc 10 secrets inventory) real:
+    # node, auto-unlock at boot" model (doc 00 §7, doc 01 secrets inventory) real:
     # WITHOUT a persisted secret the node cannot `zfs load-key` after the first
     # reboot, because /tmp/zfs.key (the install seed) is gone. Declared here so it
     # lives ENCRYPTED-AT-REST under sops-nix, not as a plaintext key in /tmp.
     #
-    # ⚠️ catastrophic-loss + break-glass (doc 09 §8): the passphrase is decryptable
+    # ⚠️ catastrophic-loss + break-glass (doc 00 §8): the passphrase is decryptable
     #    only by this node's age key (derived from its on-disk SSH host key), so a
     #    lost node fleet = unrecoverable raw-send vault unless an OFFLINE copy
     #    exists in two physical locations. Owner root, mode 0400 — never garage.
     #
     # The gateway (node-D) has no encrypted data pool; storage nodes that PROMPT-
-    # unlock (fleet.zfsAutoUnlock = false, the offsite default — doc 12/13) also
+    # unlock (fleet.zfsAutoUnlock = false, the offsite default — doc 03/04) also
     # persist NO passphrase on the box. So this secret exists ONLY when
     # fleet.zfsAutoUnlock = true (auto-unlock at boot from sops). node-D and every
     # prompt-unlock node never reference it.

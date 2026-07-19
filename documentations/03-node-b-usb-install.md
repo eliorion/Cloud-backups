@@ -1,14 +1,14 @@
-# 12 — node-B (offsite-1) install from a NixOS live USB
+# 03 — node-B (offsite-1) install from a NixOS live USB
 
 **Chosen method.** Boot the box from a NixOS installer USB (you have monitor +
 keyboard), partition with `disko`, `nixos-install` the flake. This **replaces**
-the `dd`/image-flash method in doc 11 — that one only existed because we assumed
+the `dd`/image-flash method in doc 02 — that one only existed because we assumed
 the NVMe could be flashed from another machine. The NVMe is already in the box,
 so we install in place. Standard, simplest, and it brings back two niceties:
 
 - **disko runs live** → it can *prompt* for the ZFS passphrase at format time, so
   the encrypted datasets are declared in disko (the qemu image build couldn't
-  prompt, hence doc 11's manual `zfs create`). **No key is ever stored on the box.**
+  prompt, hence doc 02's manual `zfs create`). **No key is ever stored on the box.**
 - a real installer can write an EFI NVRAM boot entry → plain **systemd-boot**, no
   GRUB-removable workaround.
 - both disks are formatted in **one `disko` run** → no post-boot HDD step.
@@ -39,7 +39,7 @@ one recurring manual step is that unlock after each reboot.
   `sops`, `openssl` — for §1.
 - Your SSH **public** key (for break-glass admin + deploy).
 
-Security invariants (unchanged from doc 09/10/11):
+Security invariants (unchanged from doc 00/01/02):
 - ZFS passphrase **never** on the box — typed at format, then at each unlock; keep
   it offline in **two** physical locations.
 - SSH host **private** key goes onto the box by direct copy to `/mnt/etc/ssh`,
@@ -134,7 +134,7 @@ sops -d secrets/common.enc.yaml >/dev/null && echo "decrypt OK"
 **`hosts/disko-node-b.nix`** — both disks, two encrypted pools, prompt key.
 
 ```nix
-# hosts/disko-node-b.nix — node-B (offsite-1), interactive install (doc 12).
+# hosts/disko-node-b.nix — node-B (offsite-1), interactive install (doc 03).
 # NVMe = ESP + UNENCRYPTED ext4 root + encrypted `npool` (meta + ssd data).
 # HDD  = encrypted `dpool` (bulk data). keylocation="prompt": disko asks for the
 # passphrase at format, and you re-enter it post-boot to unlock (never stored).
@@ -290,7 +290,7 @@ module is correct for this hardware.)
 
 ```nix
 # hosts/node-b.nix — OFFSITE-1 storage + Tailscale scraper-egress proxy.
-# Installed INTERACTIVELY from a NixOS live USB (doc 12), NOT dd/nixos-anywhere.
+# Installed INTERACTIVELY from a NixOS live USB (doc 03), NOT dd/nixos-anywhere.
 { ... }:
 {
   imports = [
@@ -641,7 +641,7 @@ sudo systemctl start garage        # Condition now satisfied
 systemctl status garage            # active (running)
 ```
 
-Configure the single-node layout (Phase 1 bring-up; add peers later per doc 10):
+Configure the single-node layout (Phase 1 bring-up; add peers later per doc 01):
 
 ```bash
 export GARAGE="sudo garage"        # uses /etc/garage.toml + admin token
@@ -708,10 +708,10 @@ store the passphrase on the box; that defeats prompt-unlock.)
 
 ## 11. Relation to other docs
 
-- **Supersedes doc 11** (`dd`/image-flash). Keep doc 11 only as the
+- **Supersedes doc 02** (`dd`/image-flash). Keep doc 02 only as the
   flash-from-another-machine alternative; this USB method is the chosen path.
-- Builds on **doc 09** (design/ADRs) and **doc 10** (phased plan). Layout,
-  peering, gateway node-D, restic/Kopia clients, sanoid retention = doc 10.
+- Builds on **doc 00** (design/ADRs) and **doc 01** (phased plan). Layout,
+  peering, gateway node-D, restic/Kopia clients, sanoid retention = doc 01.
 - node-A/-C/-D still install per their own host files; only node-B uses this
   two-disk interactive layout.
 ```

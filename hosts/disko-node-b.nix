@@ -1,11 +1,11 @@
-# hosts/disko-node-b.nix — node-B (offsite-1), interactive USB install (doc 12).
+# hosts/disko-node-b.nix — node-B (offsite-1), interactive USB install (doc 03).
 # NVMe = ESP + UNENCRYPTED ext4 root + encrypted `npool` (meta + ssd data).
 # HDD  = encrypted `dpool` (bulk data). keylocation="prompt": disko asks for the
 # passphrase at format, and you re-enter it post-boot to unlock (never stored).
 #
 # ⚠️ disko create-mode DESTROYS both disks. Only ever run on a node BEFORE it
-#    holds backups (doc 10 risk register). Confirm device paths with `lsblk` on
-#    the live USB before §5 of doc 13 / doc 12.
+#    holds backups (doc 01 risk register). Confirm device paths with `lsblk` on
+#    the live USB before §5 of doc 04 / doc 03.
 { config, ... }:
 let
   # keylocation="prompt" at runtime (the moat); a tmpfs file:// path ONLY during

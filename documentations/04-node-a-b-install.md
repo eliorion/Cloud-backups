@@ -1,4 +1,4 @@
-# 13 — node-A + node-B install runbook (dual-disk; node-A LUKS/TPM root, node-B prompt-unlock)
+# 04 — node-A + node-B install runbook (dual-disk; node-A LUKS/TPM root, node-B prompt-unlock)
 
 > **CORRECTIONS (2026-07) — these supersede the body where they conflict:**
 > - **sops/age = the flake's `-tags=purego` builds ONLY** (`mise run sops`,
@@ -18,7 +18,7 @@ nodes from bare metal to a running Garage cluster:
 - **node-A** — zone `onsite`, storage **+ dev workstation** (Phase 1,
   `modules/workstation.nix`). *No prior install doc existed; this fills that gap.*
 - **node-B** — zone `offsite-1`, storage **+** Tailscale scraper-egress proxy.
-  Detailed mechanics already in **doc 12**; here node-B is installed as the node
+  Detailed mechanics already in **doc 03**; here node-B is installed as the node
   that **joins node-A's cluster** (layout v2), not as a standalone single node.
 
 **Chosen design (locked):** each box formats **two disks** and `nixos-install`s the
@@ -47,9 +47,9 @@ This **supersedes** the single-disk auto-unlock skeleton
 `hosts/disko-node-c.nix` (same dual-disk npool+dpool shape as B). `disko-storage.nix`
 is legacy and no longer imported by any node.
 
-> Read order: **doc 09** (design/ADRs, the *why*) → **doc 10** (phased plan,
-> layout/peering/gateway/data-plane) → **doc 12** (node-B USB mechanics in full)
-> → this doc (the A→B sequence + node-A). Docs 09/10 were authored in the prod
+> Read order: **doc 00** (design/ADRs, the *why*) → **doc 01** (phased plan,
+> layout/peering/gateway/data-plane) → **doc 03** (node-B USB mechanics in full)
+> → this doc (the A→B sequence + node-A). Docs 00/01 were authored in the prod
 > repo; their bare `documentations/0X-*.md` and Flux/k8s paths point there.
 
 ---
@@ -104,9 +104,9 @@ the docs finally agree. Already committed/staged for you:
 | `zfs-passphrase` sops secret gated on `zfsAutoUnlock` (not role) | `modules/sops.nix` |
 | Multi-disk `data_dir` + `ConditionPathIsMountPoint` start-gate | `modules/garage.nix` |
 | node-A dual-ROLE host: onsite Garage (HDD `dpool`, prompt-unlock) **+** dev workstation (NVMe LUKS/TPM `wpool`, ROOT docker) + Secure Boot | `hosts/node-a.nix`, `disko-node-a.nix`, `node-a-hardware.nix`, `modules/workstation.nix`, `modules/secureboot.nix` |
-| node-B dual-disk prompt-unlock host + disko + hardware (per doc 12) | `hosts/node-b.nix`, `disko-node-b.nix`, `node-b-hardware.nix` |
+| node-B dual-disk prompt-unlock host + disko + hardware (per doc 03) | `hosts/node-b.nix`, `disko-node-b.nix`, `node-b-hardware.nix` |
 
-**Validated on real nix** (this is more than docs 11/12 could check):
+**Validated on real nix** (this is more than docs 02/03 could check):
 
 - `nix eval .#nixosConfigurations.node-a` and `…node-b` **fully evaluate to a
   toplevel system derivation** once the two Phase-0 inputs below exist.
@@ -139,13 +139,13 @@ design-pinned `2.3.0` (there is no `garage_2_3_0` attr — only `garage_1_3_0` /
 `garage_2_1_0`). Deploying as-is installs **2.1.0**. Both are v2.x (layout-format
 compatible), but to honour the pin, **bump the `nixpkgs` flake input** to a rev
 where `garage_2 == 2.3.0` (or add an overlay) before cutover — a
-Renovate/operator action (doc 10 Phase 8). Verify after locking:
+Renovate/operator action (doc 01 Phase 8). Verify after locking:
 `nix eval --raw .#nixosConfigurations.node-a.config.services.garage.package.version`.
 
 **Scope boundary — A+B is an *incomplete* cluster.** `replication_factor = 3`
 (identical on every node). With only A+B (2 zones) Garage **cannot place the full
 3 replicas** → the cluster runs **under-replicated/degraded** until **node-C**
-(zone `offsite-2`) joins. The full-mirror + site-loss tolerance gate is **doc 10
+(zone `offsite-2`) joins. The full-mirror + site-loss tolerance gate is **doc 01
 Phase 2**, reached only at 3 storage zones. Do not treat A+B as durable yet.
 
 ---
@@ -162,7 +162,7 @@ nix --version                      # flakes-enabled nix (2.x)
 # bypassing flake.lock. `scripts/fleet` picks whichever is present.
 ```
 
-Security invariants (from doc 09/12, do not break):
+Security invariants (from doc 00/03, do not break):
 
 - **dpool ZFS passphrase** (the MANUAL gate) **never** stored on the box **or in any
   sops file** — typed at format, re-typed at each unlock. Keep it offline (password
@@ -278,7 +278,7 @@ creation_rules:
   - path_regex: secrets/common\.sops\.ya?ml$
     key_groups: [ { age: [ *fleet_workstation, *node_a, *node_b ] } ]
   # Per-node authkey → ONLY its node + workstation (minimal blast radius — a
-  # tag:garage authkey is a cluster-join credential, doc 09 §8). List the specific
+  # tag:garage authkey is a cluster-join credential, doc 00 §8). List the specific
   # rules BEFORE any generic `*-tailscale` rule so sops matches the right one.
   - path_regex: secrets/node-a\.enc\.ya?ml$
     key_groups: [ { age: [ *fleet_workstation, *node_a ] } ]
@@ -296,7 +296,7 @@ grep -L 'sops:' secrets/*.enc.yaml || echo "all sops files encrypted"   # must p
 
 ## 0.5 Tailscale ACL (deny-by-default)
 
-In the Tailscale admin console (doc 09 §3):
+In the Tailscale admin console (doc 00 §3):
 
 - `tag:garage → tag:garage` on `tcp:3900,3901,3903` (the fleet talks to itself).
 - `tag:k8s → tag:garage` on **`tcp:3900` ONLY** (prod S3) — **never** `3901`
@@ -310,7 +310,7 @@ Offline, in **two physical locations** (paper/steel + password manager), store:
 the **ZFS passphrase** (you'll choose it at format in §A.3/§B), the fleet age
 **private** key (`$HOME/.config/sops/age/garage-fleet.txt`), and the
 restic/Kopia/etcd-age repo passwords. These are catastrophic-loss — the ZFS key
-is unrecoverable from a lost node fleet (doc 09 §8).
+is unrecoverable from a lost node fleet (doc 00 §8).
 
 ## 0.7 Per-host placeholders to confirm now (search `TODO operator`)
 
@@ -391,7 +391,7 @@ routine manual gate. Both live offline in the break-glass vault.
 ## Phase A — install node-A (onsite) → single-node cluster, layout v1
 
 `disko` **destroys both of node-A's disks**. node-A holds no backups yet, so this
-is safe (doc 10 risk register). Have monitor + keyboard + wired ethernet attached.
+is safe (doc 01 risk register). Have monitor + keyboard + wired ethernet attached.
 
 ### A.1 Boot the USB, confirm disks
 
@@ -608,7 +608,7 @@ builds and the IDE attaches; `dpool` can stay locked and dev still works;
 ## Phase B — install node-B (offsite-1) → **join** node-A, layout v2
 
 node-B's USB mechanics are **identical** to Phase A with `node-b` substituted, so
-follow **doc 12 §2–§7** (or repeat §A.1–§A.5 with `node-b` / `node-b-extra` /
+follow **doc 03 §2–§7** (or repeat §A.1–§A.5 with `node-b` / `node-b-extra` /
 `.#node-b`). node-B differs only in: it is a **proxy** (set `advertiseRoutes`),
 and it **joins node-A's existing cluster** instead of starting its own. node-B
 keeps the **dual-encrypted** layout (NVMe `npool` + HDD `dpool`, two passphrase
@@ -669,7 +669,7 @@ nix run .#deploy-rs -- .#node-b --remote-build
 
 > ⚠️ First post-install deploy-rs push has **no canary baseline**, so magic
 > rollback can't save a bad tailscaled/firewall change yet — keep console / the
-> box reachable for this first push (doc 09 ADR-4, flake.nix note).
+> box reachable for this first push (doc 00 ADR-4, flake.nix note).
 
 ### B.3 Two-zone layout (version 2)
 
@@ -704,10 +704,10 @@ $GARAGE repair -a --yes tables
 
 - **No full 3× mirror and no site-loss tolerance.** `replication_factor = 3` with
   only 2 zones is **under-replicated** — Garage cannot place the third replica.
-  The full-mirror + "stop a node, quorum still met" drill is **doc 10 Phase 2**,
+  The full-mirror + "stop a node, quorum still met" drill is **doc 01 Phase 2**,
   valid only once **node-C** (zone `offsite-2`) joins (`layout apply --version 3`).
-- node-D (gateway, the prod S3 entry point) is **doc 10 Phase 3**; the data-plane
-  backup jobs are **doc 10 Phase 4** (prod repo, Flux).
+- node-D (gateway, the prod S3 entry point) is **doc 01 Phase 3**; the data-plane
+  backup jobs are **doc 01 Phase 4** (prod repo, Flux).
 
 ---
 
@@ -732,24 +732,24 @@ Never store the dpool passphrase on the box (that defeats prompt-unlock). For th
 onsite node-A you *may* opt `dpool` into auto-unlock, but flipping
 `fleet.zfsAutoUnlock = true` **alone is not enough** — you must also switch
 `dpool/garage` `keylocation` to a `file://…` URL in `hosts/disko-node-a.nix` and add
-a boot load-key unit (doc 12 §9(a)), accepting the weaker theft story. node-A's
+a boot load-key unit (doc 03 §9(a)), accepting the weaker theft story. node-A's
 `wpool` is a separate concern: it is LUKS/TPM and auto-unlocks in initrd regardless.
 
 ## Relation to other docs
 
-- **doc 12** — node-B USB mechanics in full (this doc reuses them; the *only*
+- **doc 03** — node-B USB mechanics in full (this doc reuses them; the *only*
   additions here are node-A and the A→B join/layout-v2 sequence).
-- **doc 11** — the superseded `dd`/image-flash method; keep only as the
+- **doc 02** — the superseded `dd`/image-flash method; keep only as the
   flash-from-another-machine fallback.
-- **doc 10** — node-C (Phase 2, completes the 3-zone factor-3 mirror), node-D
+- **doc 01** — node-C (Phase 2, completes the 3-zone factor-3 mirror), node-D
   gateway (Phase 3), data-plane backup jobs (Phase 4+), monitoring, restore
   drills. **Continue there after A+B.**
-- **doc 09** — design, ADRs, the moat, boot-trust, secrets inventory.
+- **doc 00** — design, ADRs, the moat, boot-trust, secrets inventory.
 
 ## Appendix — repo changes applied for this design (for reviewers)
 
 Reconciliation from the single-disk auto-unlock skeleton to the dual-disk
-prompt-unlock model (so docs 11/12 and the code agree):
+prompt-unlock model (so docs 02/03 and the code agree):
 
 - `modules/base.nix` — added `fleet.zfsAutoUnlock` option (default `false`).
 - `modules/sops.nix` — `zfs-passphrase` now gated on `fleet.zfsAutoUnlock`
@@ -776,7 +776,7 @@ prompt-unlock model (so docs 11/12 and the code agree):
   deliberate moat trade), docker `zfs` driver on `wpool/docker`, agent-forwarding-off
   via sshd `Match User sysadmin`, ZFS ARC cap. Co-located with the DR Garage role.
 - `hosts/node-b.nix` + `disko-node-b.nix` + `node-b-hardware.nix` — **new/rewritten**
-  per doc 12.
+  per doc 03.
 - `hosts/node-c.nix` + `disko-node-c.nix` + `node-c-hardware.nix` — **new**. node-C
   now imports its OWN dual-disk `disko-node-c.nix` (same npool+dpool shape as B,
   same AMD Lenovo box) and reuses `node-b-hardware.nix`. Garage capacities match

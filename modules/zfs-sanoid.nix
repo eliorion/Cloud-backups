@@ -1,4 +1,4 @@
-# modules/zfs-sanoid.nix — the ransomware MOAT (doc 09 §7, doc 10 Phase 5).
+# modules/zfs-sanoid.nix — the ransomware MOAT (doc 00 §7, doc 01 Phase 5).
 # In commonModules (flake.nix) like every other fleet module; its config is a
 # no-op unless `fleet.role == "storage"`, so the gateway (node-D, no data pool)
 # is excluded automatically rather than by remembering not to import it.
@@ -16,7 +16,7 @@
 #   once; the geography is the defence. Recovery from a mass-delete is
 #   `zfs clone` (verify) then `zfs rollback`.
 #
-# HARD INVARIANT (audit in doc 10 Phase 5 gate): `zfs allow bpool/garage` must
+# HARD INVARIANT (audit in doc 01 Phase 5 gate): `zfs allow bpool/garage` must
 # show the garage user NOWHERE. Never `zfs allow garage …destroy/rollback`.
 #
 # ⚠️ NODE-A EXCEPTION — the moat above does NOT hold on node-A. It also runs the
@@ -47,7 +47,7 @@
     services.sanoid = {
       enable = true;
       templates.garage = {
-        # hourly + daily ladder, 30–90d retention (doc 09 §7 / doc 10 Phase 5).
+        # hourly + daily ladder, 30–90d retention (doc 00 §7 / doc 01 Phase 5).
         hourly = 48; # ~2 days of hourly granularity
         daily = 90; # 90 days of daily — the long-retention immutable tier
         monthly = 3;
@@ -58,7 +58,7 @@
       # ⚠️ meta and data are SEPARATE datasets (and, on dual-disk nodes, separate
       #    POOLS npool/dpool) and are NOT crash-consistent together — a rollback
       #    must snapshot/roll BOTH and then `garage repair blocks` to reconcile
-      #    (doc 09 §10 ransomware path).
+      #    (doc 00 §10 ransomware path).
       datasets = lib.genAttrs config.fleet.sanoidDatasets (_: {
         useTemplate = [ "garage" ];
         recursive = true;
@@ -75,7 +75,7 @@
     # NOTE: the moat depends on the garage user holding NO zfs allow on
     # bpool/garage. We deliberately declare NOTHING that grants it. If a future
     # change needs garage to self-snapshot, do it through sanoid/root — never via
-    # `zfs allow garage`. (Optional hardening, doc 10 Phase 5: `zfs hold` key
+    # `zfs allow garage`. (Optional hardening, doc 01 Phase 5: `zfs hold` key
     # snapshots to block destroy even by root — left to the operator.)
   };
 }

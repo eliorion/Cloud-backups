@@ -8,7 +8,7 @@ choice optimises for four things in order: **security-by-design**,
 **ransomware resistance**, **fully-IaC**, and **least manual ops AND restore**.
 
 This is the design + decision record. The phased build runbook is
-`documentations/10-garage-backup-implementation-plan.md`. The CNPG→object-store
+`documentations/01-garage-backup-implementation-plan.md`. The CNPG→object-store
 mechanics (ObjectStore CRD, Barman Cloud Plugin, WAL archiving, PITR, Flux
 CRD/CR ordering) are **already documented in `documentations/03-backups.md`**;
 this doc *extends* that — Garage becomes an additional, self-hosted destination,
@@ -21,7 +21,7 @@ so 03 is referenced rather than repeated.
 > garage-fleet repo.
 
 > ⚠️ **Design only — not yet applied.** No node is provisioned. The Garage
-> version, NixOS channel, and chart pins in doc 10 are the source of truth for
+> version, NixOS channel, and chart pins in doc 01 are the source of truth for
 > the build; this doc explains *why* the shape is what it is.
 
 ---
@@ -287,7 +287,7 @@ you can't physically reach. colmena is simpler if out-of-band console exists.
 > the first reachable-config deploy with console/initrd-SSH fallback available.
 > (b) Neither tool supports passphrase-protected or per-host SSH keys — configure
 > identities in `~/.ssh/config` keyed by Tailscale MagicDNS name. Both are
-> implementation cautions for doc 10, not design changes.
+> implementation cautions for doc 01, not design changes.
 
 **Rejected alternatives.** *Imperative Ansible/SSH scripts* — drift, not
 OS-as-code (also rejected by ADR-2). *NixOps* — heavier/older state model than
@@ -388,7 +388,7 @@ admin_token_file   = "/run/secrets/garage-admin"
 > renders this TOML into the **world-readable Nix store**; an inline token value
 > leaks the secret there and breaks the sops-nix-only secrets model (§8). The
 > `_file` variants point at sops-nix paths (`/run/secrets/garage-metrics`,
-> `/run/secrets/garage-admin`), matching doc 10 Phase 1 — `rpc_secret_file`
+> `/run/secrets/garage-admin`), matching doc 01 Phase 1 — `rpc_secret_file`
 > above is already file-based; the two token keys follow suit.
 
 > ⚠️ Over Tailscale, `rpc_public_addr` **must** be each node's overlay IP and
@@ -534,7 +534,7 @@ credentials `Secret`. Two Garage-specific deltas vs the R2 example in 03:
   `infrastructure/services/staging/keycloak/database/objectstore.yaml`) set
   `encryption: AES256` on both `wal` and `data`; the Garage ObjectStore
   intentionally **omits** it pending that SSE-honouring check. This is an
-  intentional change from the established repo pattern, not an oversight — doc 10
+  intentional change from the established repo pattern, not an oversight — doc 01
   Phase 4b's skeleton omits `encryption` for the same reason.
 
 **WAL-archiver constraint (resolve before wiring).** CNPG's plugin marks exactly
@@ -542,14 +542,14 @@ credentials `Secret`. Two Garage-specific deltas vs the R2 example in 03:
 two simultaneous WAL archivers. So "add Garage *alongside* R2" is not a free
 additive change for the *same* cluster: base backups can fan out, but continuous
 WAL archiving has a single destination. The design therefore picks **one** of:
-- **(a) Garage replaces R2 as the WAL archiver** — then doc 03's R2 ObjectStore
+- **(a) Garage replaces R2 as the WAL archiver** — then prod doc 03's R2 ObjectStore
   is demoted to base-only or removed, and Garage holds the full PITR chain
   (WAL + base) so a Garage-only PITR restore drill is valid; or
 - **(b) R2 stays the WAL archiver, Garage receives independent scheduled base
   backups only** — then a Garage-only restore is *base-only*, **not** true PITR,
-  and the restore drill (§10, doc 10 Phase 7) must be scoped to a base restore.
+  and the restore drill (§10, doc 01 Phase 7) must be scoped to a base restore.
 
-Doc 10 Phase 4b records the chosen fork; the restore drill in §10 / doc 10
+Doc 01 Phase 4b records the chosen fork; the restore drill in §10 / doc 01
 Phase 7 must match it. Do not present a Garage-only PITR drill if Garage is not
 the WAL archiver.
 
@@ -712,7 +712,7 @@ key (`ssh-to-age`).
 > offsite vault's received raw datasets must be confirmed loadable **from the
 > break-glass copy**, not only from a surviving node.
 
-> ⚠️ sops-nix bootstrap order (doc 10): if a node's age identity is derived from
+> ⚠️ sops-nix bootstrap order (doc 01): if a node's age identity is derived from
 > its SSH host key, seed `/etc/ssh/ssh_host_ed25519_key` via nixos-anywhere
 > `--extra-files`, add the resulting age recipient to `.sops.yaml`, and
 > re-encrypt **before** the first deploy — or activation can't decrypt and the
@@ -788,7 +788,7 @@ and goes unnoticed).
 
 ## 10. Restore runbooks (concise)
 
-Full step-by-step belongs in doc 10; these are the recovery shapes per scenario.
+Full step-by-step belongs in doc 01; these are the recovery shapes per scenario.
 
 ### etcd — lost control-plane quorum (same cluster)
 
@@ -889,8 +889,8 @@ The moat path, when objects are gone or corrupted but ZFS snapshots survive:
 
 | Concern | Path |
 |---|---|
-| This design + decision record | `documentations/09-garage-backup-cluster.md` |
-| Phased build runbook | `documentations/10-garage-backup-implementation-plan.md` |
+| This design + decision record | `documentations/00-garage-backup-cluster.md` |
+| Phased build runbook | `documentations/01-garage-backup-implementation-plan.md` |
 | CNPG → object-store mechanics (extended here) | `documentations/03-backups.md` |
 | Telegram alerting (extended in §9) | `documentations/05-alerting.md` |
 | Talos node-config (etcd API access for the CronJob) | `bootstraping/talconfig.yaml` |

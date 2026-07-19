@@ -1,6 +1,6 @@
 # Garage backup cluster — phased implementation plan
 
-Build the architecture from `documentations/09-garage-backup-cluster.md`: a
+Build the architecture from `documentations/00-garage-backup-cluster.md`: a
 4-node, geo-distributed, self-hosted **Garage** S3 cluster (NixOS + ZFS) that
 serves as the ransomware-resistant DR target for the Talos prod cluster (etcd
 snapshots, CNPG Postgres PITR, selected Longhorn PVCs). This is the **runbook** —
@@ -575,7 +575,7 @@ becomes `http://tailscale-proxy-garage.tailscale.svc.cluster.local:3900`.
       plugin marks exactly **one** `ObjectStore` as `isWALArchiver: true`; a
       cluster cannot have two simultaneous WAL archivers). Pick **one** and record
       it here:
-      - **(a) Garage REPLACES R2 as the WAL archiver** — doc 03's R2 ObjectStore
+      - **(a) Garage REPLACES R2 as the WAL archiver** — prod doc 03's R2 ObjectStore
         is demoted to base-only or removed; Garage then holds the full PITR chain
         (WAL + base), so the Phase 7 Garage-only restore drill can do true PITR; or
       - **(b) R2 stays the WAL archiver; Garage gets independent scheduled BASE
@@ -820,7 +820,7 @@ query, and alerts on failure. Plus one-command restore runbooks for real DR.
       --recover-from` against prod in a drill.)
 - [ ] **Repo integrity checks.** `restic check` (etcd repo) and Kopia repo
       verification (Velero) on a schedule.
-- [ ] **Write one-command DR runbooks** (`documentations/10` appendix or a sibling):
+- [ ] **Write one-command DR runbooks** (`documentations/01` appendix or a sibling):
       - **etcd:** `talosctl reset --graceful=false --reboot
         --system-labels-to-wipe=EPHEMERAL` on ONE recovery CP node, then
         `talosctl -n <IP> bootstrap --recover-from=./db.snapshot` (snapshots from
@@ -971,7 +971,7 @@ surface, and lock version pinning so Renovate can't silently break it.
 
 ## See also
 
-- `documentations/09-garage-backup-cluster.md` — design + rationale (the *why*).
+- `documentations/00-garage-backup-cluster.md` — design + rationale (the *why*).
 - `documentations/03-backups.md` — CNPG→object-store mechanics (ObjectStore /
   ScheduledBackup / Barman plugin / PITR / Flux CRD-vs-CR ordering). This plan
   reuses those; it does not re-explain them.

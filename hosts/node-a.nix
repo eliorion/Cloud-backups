@@ -1,8 +1,8 @@
-# hosts/node-a.nix — ONSITE storage node (zone onsite). doc 09 §3, doc 13.
+# hosts/node-a.nix — ONSITE storage node (zone onsite). doc 00 §3, doc 04.
 #
 # DUAL ROLE: onsite DR Garage storage AND a remote devcontainer workstation
 # (../modules/workstation.nix, driven from a Mac via DevPod). Installed
-# INTERACTIVELY from a NixOS live USB (doc 13). TWO trust domains, split by disk:
+# INTERACTIVELY from a NixOS live USB (doc 04). TWO trust domains, split by disk:
 #
 #   NVMe = LUKS2 (cryptwork) -> ZFS `wpool` -> wpool/{root,home,docker}. The
 #     TPM-AUTO domain: unsealed unattended in initrd (TPM2 bound to PCR 7, no
@@ -70,7 +70,7 @@
     role = "storage";
     zone = "onsite";
     proxyNode = false; # onsite node carries NO Tailscale scraper-egress proxy
-    # Fleet default = prompt-unlock (doc 13). Kept false to match the rest of the
+    # Fleet default = prompt-unlock (doc 04). Kept false to match the rest of the
     # fleet. NOTE: flipping this to true is NOT sufficient to auto-unlock dpool on
     # node-A — it only declares the sops zfs-passphrase secret. To actually skip
     # the per-reboot unlock you must also switch dpool/garage keylocation to a
@@ -84,7 +84,7 @@
     # the console (§5-8). Flipping true before the keys exist = unbootable box.
     secureBoot = true;
 
-    # TODO operator: node-A's tailscale0 overlay IP — set AFTER first join (doc 13).
+    # TODO operator: node-A's tailscale0 overlay IP — set AFTER first join (doc 04).
     tailscaleIp = "100.122.58.119";
 
     # Cluster gossip: every OTHER node's `garage node id`. B (offsite-1) here; add
@@ -117,5 +117,5 @@
   # Per-node Tailscale auth key file (see modules/sops.nix + secrets/.example).
 
   # Garage capacity for this node's layout assignment is applied imperatively:
-  #   garage layout assign <id-A> -z onsite -c <bytes>   (doc 13 Phase A)
+  #   garage layout assign <id-A> -z onsite -c <bytes>   (doc 04 Phase A)
 }

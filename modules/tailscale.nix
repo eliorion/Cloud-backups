@@ -1,15 +1,15 @@
-# modules/tailscale.nix — fleet tailnet membership (doc 09 §3/§8, doc 10
+# modules/tailscale.nix — fleet tailnet membership (doc 00 §3/§8, doc 01
 # Phase 1/2). Every Garage listener rides the tailnet only; this module joins
 # the node to the tailnet, tags it tag:garage, and toggles the
 # subnet-router/exit-node role for the offsite proxy nodes (B/C).
 #
 # The authkey comes from sops-nix (per-node file, see modules/sops.nix +
 # hosts/*.nix). It is a reusable, non-ephemeral, tagged key — a CLUSTER-JOIN
-# CREDENTIAL (doc 09 §8): on suspected leak, revoke + re-mint in the admin
+# CREDENTIAL (doc 00 §8): on suspected leak, revoke + re-mint in the admin
 # console.
 #
 # DENY-BY-DEFAULT ACL (lives in the Tailscale admin console, NOT in this repo —
-# referenced here for the operator, doc 09 §3, doc 10 Phase 0):
+# referenced here for the operator, doc 00 §3, doc 01 Phase 0):
 #   - tag:garage  -> tag:garage  on tcp:3900,3901,3903   (fleet talks to itself)
 #   - tag:k8s     -> tag:garage  on tcp:3900 ONLY         (prod S3, never RPC/admin)
 #   The prod cluster reaching :3901 (RPC) could join the gossip cluster; reaching
@@ -18,7 +18,7 @@
 let
   cfg = config.fleet;
   # Offsite storage nodes (B/C) also carry the Tailscale scraper-egress proxy
-  # role: they advertise routes / act as exit nodes (doc 09 §3, doc 10 Phase 2).
+  # role: they advertise routes / act as exit nodes (doc 00 §3, doc 01 Phase 2).
   # Set per host via fleet.proxyNode.
   isProxy = cfg.proxyNode;
 in
@@ -56,7 +56,7 @@ in
         ]
         # Subnet route(s) for the scraper-egress role come from fleet.advertiseRoutes
         # (set per host). Must match the role this node carries; approve in the ACL
-        # (doc 10 Phase 2). Empty list → no --advertise-routes flag emitted.
+        # (doc 01 Phase 2). Empty list → no --advertise-routes flag emitted.
         ++ lib.optionals (isProxy && cfg.advertiseRoutes != [ ]) [
           "--advertise-routes=${lib.concatStringsSep "," cfg.advertiseRoutes}"
         ];

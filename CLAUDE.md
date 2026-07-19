@@ -13,18 +13,23 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
 
 **Authoritative design + plan** (read first):
 
-- `documentations/09-garage-backup-cluster.md` — design + decision records (the *why*).
-- `documentations/10-garage-backup-implementation-plan.md` — phased runbook (the *how*).
-- `documentations/11-node-b-image-flash.md`, `12-node-b-usb-install.md` — node provisioning.
+- `documentations/00-garage-backup-cluster.md` — design + decision records (the *why*).
+- `documentations/01-garage-backup-implementation-plan.md` — phased runbook (the *how*).
+- `documentations/02-node-b-image-flash.md`, `03-node-b-usb-install.md`,
+  `04-node-a-b-install.md`, `05-node-a-secure-pipeline.md` — node provisioning.
+- `documentations/06-garage-buckets-guide.md` — declarative S3 buckets + keys
+  (`fleet buckets`): add a bucket, access it with a key.
 
-> Docs 09/10 were authored in the prod repo and bundled here; their bare
+> Docs 00/01 were authored in the prod repo and bundled here; their bare
 > `documentations/0X-*.md` references and Flux/k8s paths point at the prod repo,
-> not this one.
+> not this one. (This repo's docs were renumbered from 09–14 → 00–05; a reference
+> that means a PROD doc is written "prod doc NN" — e.g. prod doc 03 — to avoid
+> colliding with this repo's own 00–05.)
 
 ## Repo layout
 
 - `scripts/fleet` — **single workstation entrypoint** for the node lifecycle
-  (`new`/`install`/`finalize`/`deploy`/`rollback`/`unlock`/`status`/`secrets`/`config`); replaced the
+  (`new`/`install`/`finalize`/`deploy`/`rollback`/`unlock`/`status`/`secrets`/`config`/`buckets`); replaced the
   former `bootstrap-node` + `deploy-node`. `private-keys/` (gitignored) holds the
   fleet age key + per-node SSH host keys; `.fleet/` (gitignored) holds deploy markers.
 - `flake.nix` — inputs (incl. `lanzaboote` v0.4.2 for node-A Secure Boot);
@@ -58,13 +63,15 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
   `-install` variant; node-A's LUKS root additionally reads `fleet.luksInstallKeyfile`
   at install (its own passphrase, node-A only).
 - `secrets/` — `gen-secrets.sh`, `common.enc.yaml.example`,
-  `node.enc.yaml.example`
+  `node.enc.yaml.example`; `s3-keys.enc.yaml` = the Garage S3 access keys
+  (etcd + CNPG buckets), encrypted to the **workstation key ONLY** (never a node),
+  managed by `fleet buckets` (doc 06).
 - `.sops.yaml` — **FLEET** age recipients (separate trust domain from prod)
 
 Node roles: `node-a` onsite storage; `node-b` offsite-1 storage+proxy; `node-c`
 offsite-2 storage+proxy; `node-d` gateway (capacity 0, no data/zone). **node-D is
 already in production** — reconfigure it **additively** (do not import
-`disko-gateway.nix` in place); see doc 10 Phase 3.
+`disko-gateway.nix` in place); see doc 01 Phase 3.
 
 ## Conventions
 
@@ -100,10 +107,10 @@ already in production** — reconfigure it **additively** (do not import
   stale `known_hosts` entry).
 - **Garage layout** is imperative: `garage layout assign … -z <zone> -c <bytes>`,
   then `garage layout apply --version <prev+1>` — exactly `prev+1`, once.
-- **Garage version**: design target is `v2.3.0` (docs 09/10), but what actually
+- **Garage version**: design target is `v2.3.0` (docs 00/01), but what actually
   deploys is **`2.1.0`** — nixpkgs `nixos-25.05` has no `garage_2_3_0` attr
   (newest is `garage_2_1_0`), so `pkgs.garage_2` resolves to 2.1.0. To really get
-  2.3.0, bump the nixpkgs input or add an overlay (doc 13). Renovate tracks the
+  2.3.0, bump the nixpkgs input or add an overlay (doc 04). Renovate tracks the
   input. Verify, never assume:
   `nix eval --raw .#nixosConfigurations.node-a.config.services.garage.package.version`
 - **Neither 2.1.0 nor 2.3.0 has Object Lock or S3 versioning** — immutability is
