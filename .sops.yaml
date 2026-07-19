@@ -44,6 +44,17 @@ creation_rules:
           - *node_c
           - *node_d
 
+  # S3 access keys for the Garage buckets (etcd + CNPG backups). CONTROL-PLANE
+  # ONLY: encrypted to the workstation/fleet key and to NO node. `scripts/fleet
+  # buckets` decrypts these on the workstation and pushes them to a live storage
+  # node over ssh just-in-time (garage key import) — no node ever stores them, so
+  # losing any single node never exposes or blocks the S3 credentials. Must stay
+  # ABOVE the node-*.enc.yaml rules (top-down, first match wins).
+  - path_regex: secrets/s3-keys\.enc\.ya?ml$
+    key_groups:
+      - age:
+          - *fleet_workstation
+
   # PER-NODE secrets: tailscale-authkey (cluster-join credential, doc 09 §8),
   # root_password_hash (console rescue), zfs-passphrase (only if zfsAutoUnlock).
   # ONE file per node, encrypted to ONLY that node + the workstation, so a leaked

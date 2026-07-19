@@ -40,6 +40,15 @@
 #   fleet status  [<node>]      Readiness + lifecycle state per node.
 #   fleet secrets               Edit / verify / git-add the encrypted secrets.
 #   fleet config tailnet <name> Set the MagicDNS tailnet in flake.nix.
+#   fleet buckets <keygen|apply|status>
+#                               Declarative Garage S3 buckets + access keys for the
+#                               backup consumers (etcd + CNPG). keygen mints the key
+#                               material into secrets/s3-keys.enc.yaml (workstation-
+#                               only, NEVER on a node); apply creates the buckets +
+#                               imports the keys + grants them on a live storage node
+#                               (idempotent — the reprovision path); status shows the
+#                               live state. Edit the bucket/key spec in the buckets
+#                               section of this script.
 #   fleet guide   <node>        Print the on-box fallback runbook (doc 13).
 #
 # Tool needs:
@@ -857,6 +866,156 @@ cmd_config() {
     sed -i -E "s|tailnet = \"[^\"]*\";|tailnet = \"${name}\";|" "$FLAKE"; ok "tailnet updated to '$name'"; fi
 }
 
+# ============================================================================= buckets
+# Declarative S3 bucket + key spec for the fleet — the SINGLE source of truth.
+# Edit here to add/rename a bucket or key.
+#   fleet buckets keygen   mint the key material into secrets/s3-keys.enc.yaml
+#   fleet buckets apply    create buckets + import keys + grant, on a live node
+#   fleet buckets status   show live buckets/keys/permissions
+#
+# S3 keys are CONTROL-PLANE credentials: minted + stored ONLY on the workstation
+# (secrets/s3-keys.enc.yaml, encrypted to the fleet key, NEVER shipped to a node),
+# pushed to a node over ssh only at apply time. So no node stores them, losing any
+# one node neither exposes nor blocks the S3 creds, and after ANY rebuild `fleet
+# buckets apply` restores identical buckets + credentials (prod jobs never re-wire).
+S3KEYS="$SECRETS/s3-keys.enc.yaml"
+BUCKETS=(etcd-backup cnpg-staging-asp cnpg-staging-fbref)
+# name : id-field : secret-field : bucket[,bucket...]   (fields = flat keys in $S3KEYS)
+# One key PER bucket — a leaked key exposes only its own cluster's backups, and a
+# compromised prod consumer cannot reach the other cluster's bucket. NOTE: garage
+# has only read/write/owner — --write includes DeleteObject (no delete-less grant);
+# object immutability is the ZFS snapshot moat, not the key ACL.
+S3_KEYS=(
+  "etcd-key:s3_etcd_id:s3_etcd_secret:etcd-backup"
+  "cnpg-asp-key:s3_cnpg_asp_id:s3_cnpg_asp_secret:cnpg-staging-asp"
+  "cnpg-fbref-key:s3_cnpg_fbref_id:s3_cnpg_fbref_secret:cnpg-staging-fbref"
+)
+
+# Read one flat field from the (workstation-only) encrypted S3 key file.
+s3_get() { sops -d --extract "[\"$1\"]" "$S3KEYS" 2>/dev/null || true; }
+
+# First storage node (a/b/c) reachable over the tailnet WITH garage up — bucket
+# ops need the RPC socket live. Echoes the host; non-zero if none reachable.
+reachable_storage_node() {
+  tailnet_set || die "tailnet unset — set it first: fleet config tailnet <name>"
+  local n host
+  for n in node-a node-b node-c; do
+    [[ -f "$HOSTS/$n.nix" ]] || continue
+    host="$(deploy_host "$n")"
+    if [[ "$(ssh -o BatchMode=yes -o ConnectTimeout=4 "root@$host" \
+              'systemctl is-active garage.service' 2>/dev/null)" == active ]]; then
+      printf '%s' "$host"; return 0
+    fi
+  done
+  return 1
+}
+
+cmd_buckets() {
+  case "${1:-}" in
+    keygen) shift; buckets_keygen "$@";;
+    apply)  shift; buckets_apply  "$@";;
+    status) shift; buckets_status "$@";;
+    ""|-h|--help) note "usage: fleet buckets <keygen|apply|status>";;
+    *) die "unknown buckets subcommand: $1 (keygen|apply|status)";;
+  esac
+}
+
+# Mint any MISSING S3 key material into $S3KEYS. Idempotent — a present key is
+# NEVER overwritten (that would orphan the live cluster + prod creds). Pure
+# workstation-local: GK+24hex id + 64hex secret (garage's format), no node needed.
+buckets_keygen() {
+  need openssl; _purego_resolve
+  local tmp; tmp="$(mktemp)"; chmod 600 "$tmp"
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp'" RETURN
+  if [[ -f "$S3KEYS" ]]; then
+    encrypted "$S3KEYS" || die "$S3KEYS exists but is PLAINTEXT — refusing to touch it."
+    sops -d "$S3KEYS" > "$tmp"
+  fi
+  hdr "buckets keygen -> $S3KEYS"
+  local spec name idf secf rest field val changed=0
+  for spec in "${S3_KEYS[@]}"; do
+    IFS=: read -r name idf secf rest <<<"$spec"
+    for field in "$idf" "$secf"; do
+      if grep -q "^${field}:" "$tmp"; then
+        note "$field already present — kept"
+      else
+        case "$field" in
+          *_id) val="GK$(openssl rand -hex 12)";;
+          *)    val="$(openssl rand -hex 32)";;
+        esac
+        printf '%s: %s\n' "$field" "$val" >> "$tmp"
+        ok "minted $field"; changed=1
+      fi
+    done
+  done
+  if [[ $changed == 0 ]]; then note "nothing to mint — all keys already present."; return 0; fi
+  cp "$tmp" "$S3KEYS"
+  sops --config "$SOPS_YAML" -e -i "$S3KEYS"
+  encrypted "$S3KEYS" || die "FATAL: $S3KEYS did not encrypt — inspect it NOW (may hold plaintext keys)."
+  ok "wrote + encrypted $S3KEYS (workstation-only recipient)."
+  warn "Copy these into your password manager AND prod's k8s backup Secret, then apply:"
+  note "  fleet buckets apply        # push to the cluster"
+  note "  fleet secrets  (choice v)  # stage the ENCRYPTED s3-keys.enc.yaml, then commit"
+}
+
+# Push the declared buckets + keys to a live storage node. Idempotent. Secret
+# material travels over ssh STDIN (never argv). This is the reprovision path:
+# run it after a rebuild to restore identical buckets + credentials cluster-wide.
+buckets_apply() {
+  need ssh; _purego_resolve
+  [[ -f "$S3KEYS" ]] || die "no S3 keys yet — run: fleet buckets keygen"
+  local host; host="$(reachable_storage_node)" \
+    || die "no storage node reachable with garage up (check: fleet status / fleet unlock <node>)."
+  hdr "buckets apply -> $host"
+
+  # Remote reconciler: reads a manifest on stdin (a BUCKETS line + one KEY line per
+  # key), runs create/import/allow. garage reads /dev/null so it never eats the loop.
+  local remote='set -eu
+G() { garage -c /etc/garage.toml "$@" </dev/null; }
+while read -r kind body; do
+  case "$kind" in
+    BUCKETS) for b in $body; do G bucket create "$b" 2>/dev/null || true; echo ">> bucket $b"; done ;;
+    KEY)
+      # shellcheck disable=SC2086
+      set -- $body; name=$1; id=$2; secret=$3; bkts=$4
+      if G key info "$id" >/dev/null 2>&1; then echo ">> key $name exists ($id)"
+      else G key import --yes -n "$name" "$id" "$secret" >/dev/null; echo ">> imported $name ($id)"; fi
+      oldifs=$IFS; IFS=,
+      for b in $bkts; do G bucket allow --read --write "$b" --key "$id" >/dev/null; echo ">> allow $name rw $b"; done
+      IFS=$oldifs ;;
+  esac
+done'
+
+  local spec name idf secf bkts id secret
+  {
+    printf 'BUCKETS %s\n' "${BUCKETS[*]}"
+    for spec in "${S3_KEYS[@]}"; do
+      IFS=: read -r name idf secf bkts <<<"$spec"
+      id="$(s3_get "$idf")"; secret="$(s3_get "$secf")"
+      [[ -n "$id" && -n "$secret" ]] || die "missing $idf/$secf in $S3KEYS — run: fleet buckets keygen"
+      printf 'KEY %s %s %s %s\n' "$name" "$id" "$secret" "$bkts"
+    done
+  } | ssh -o BatchMode=yes -o ConnectTimeout=10 "root@$host" "$remote" | sed 's/^/  /'
+  ok "buckets applied on $host (cluster-wide state; other nodes gossip it)."
+}
+
+# Show live buckets, keys, and per-bucket permissions from a reachable node.
+buckets_status() {
+  need ssh
+  local host; host="$(reachable_storage_node)" \
+    || die "no storage node reachable with garage up."
+  hdr "buckets status @ $host"
+  local remote='set -eu
+garage -c /etc/garage.toml bucket list
+echo; garage -c /etc/garage.toml key list; echo
+for b in '"${BUCKETS[*]}"'; do
+  echo "== $b =="
+  garage -c /etc/garage.toml bucket info "$b" 2>/dev/null || echo "  (absent)"
+done'
+  ssh -o BatchMode=yes -o ConnectTimeout=8 "root@$host" "$remote" | sed 's/^/  /'
+}
+
 # ============================================================================= secrets
 cmd_secrets() {
   while :; do
@@ -885,6 +1044,35 @@ cmd_secrets() {
   done
 }
 
+# Gitignored, NON-regenerable key material = the exact set to keep OFFLINE in the
+# password manager. The devcontainer workstation is disposable — a rebuild wipes
+# private-keys/ — so this warns when any file is missing, catching a HALF-RESTORED
+# workstation before an install/deploy. Returns nonzero if anything is missing.
+vault_check() {
+  local nodes=("$@") miss=0 node p base
+  hdr "vault — gitignored keys to keep in the password manager"
+  base="$(basename "$FLEET_AGE_KEY_FILE")"
+  if [[ -f "$FLEET_AGE_KEY_FILE" ]]; then
+    printf '  %s %-18s %s\n' "$(mk ok)" "$base" 'fleet age key — decrypts ALL node secrets'
+  else
+    printf '  %s %-18s %s\n' "$(mk no)" "$base" 'MISSING — restore from password manager'; miss=1
+  fi
+  for node in "${nodes[@]}"; do
+    p="$(node_age_key_path "$node")"
+    if [[ -f "$p" ]]; then
+      printf '  %s %-18s %s\n' "$(mk ok)" "$(basename "$p")" "$node identity (seeded at install)"
+    else
+      printf '  %s %-18s %s\n' "$(mk no)" "$(basename "$p")" "MISSING — restore from password manager"; miss=1
+    fi
+  done
+  if [[ $miss == 1 ]]; then
+    warn "vault INCOMPLETE — this workstation is half-restored. Paste the missing"
+    warn "file(s) into private-keys/ (chmod 600) BEFORE any install/deploy."
+  fi
+  note "Also vault (not files): ZFS passphrases (A dpool + A LUKS-recovery + B + C) and per-node root passwords."
+  return "$miss"
+}
+
 # ============================================================================= status
 cmd_status() {
   local nodes=()
@@ -906,6 +1094,8 @@ cmd_status() {
   printf '  %-16s %s  %s\n' 'tailnet' \
     "$(tailnet_set && mk ok || mk no)" \
     "$(tailnet_set && grep -oP 'tailnet = "\K[^"]+' "$FLAKE" | head -1 || printf '<unset>')"
+
+  vault_check "${nodes[@]}" || true
 
   # --- per-node table. Each status column is 9 cells: a header "  %-7s" (2+7) and
   # a data cell "  <glyph>      " (2 + 1 glyph + 6 spaces). The glyph is one display
@@ -1211,6 +1401,7 @@ cmd_menu() {
     7) config tailnet   set MagicDNS tailnet
     8) guide <node>     on-box fallback runbook
     9) unlock <node>    feed ZFS passphrase to a locked node
+    b) buckets          S3 buckets + keys (keygen / apply / status)
     q) quit
 EOF
     local c; c="$(ask 'choice')"
@@ -1225,6 +1416,7 @@ EOF
       7) cmd_config tailnet "$(ask 'tailnet name')" || true; pause;;
       8) cmd_guide "$(ask 'node')" || true; pause;;
       9) cmd_unlock "$(ask 'node')" || true; pause;;
+      b|B) cmd_buckets "$(ask 'buckets action (keygen/apply/status)')" || true; pause;;
       q|Q|"") echo "bye."; return 0;;
       *) warn "unknown choice"; pause;;
     esac
@@ -1244,6 +1436,7 @@ main() {
     status)   shift; cmd_status "$@";;
     secrets)  shift; cmd_secrets "$@";;
     config)   shift; cmd_config "$@";;
+    buckets)  shift; cmd_buckets "$@";;
     guide)    shift; cmd_guide "$@";;
     ""|menu)  cmd_menu;;
     -h|--help|help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//';;
