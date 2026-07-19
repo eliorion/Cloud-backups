@@ -34,6 +34,17 @@ in
     description = "Multi-disk Garage data_dir list [{path,capacity}]; null = single dataDir.";
   };
 
+  # Every OTHER node this node should gossip to, as "<pubkey>@<overlay_ip>:3901"
+  # (the `garage node id` output of each peer). Declarative + persistent, so the
+  # cluster re-forms over the tailnet after any reboot without a manual `garage
+  # node connect`. Empty = single-node bring-up. Set per host in hosts/*.nix.
+  options.fleet.bootstrapPeers = lib.mkOption {
+    type = lib.types.listOf lib.types.str;
+    default = [ ];
+    example = [ "aef46cd1…@100.64.0.10:3901" ];
+    description = "Other nodes' <pubkey>@<overlay_ip>:3901 for Garage bootstrap_peers (cluster gossip over the tailnet).";
+  };
+
   config = {
     services.garage = {
       enable = true;
@@ -77,13 +88,10 @@ in
         rpc_public_addr = "${tsIp}:3901";
         rpc_secret_file = config.sops.secrets."rpc_secret".path;
 
-        # TODO operator: list every OTHER node as pubkey@<overlay_ip>:3901 so the
-        # cluster forms over the tailnet (doc 10 Phase 2). The node's own pubkey
-        # is printed by `garage node id` after first boot; alternatively use
-        # `garage node connect` once. Leave [] for the single-node Phase 1 bring-up.
-        bootstrap_peers = [
-          # "<peer-pubkey>@100.64.0.x:3901"
-        ];
+        # Every OTHER node as pubkey@<overlay_ip>:3901 so the cluster forms over the
+        # tailnet (doc 10 Phase 2). Set per host via fleet.bootstrapPeers (each
+        # peer's `garage node id`). Empty = single-node bring-up.
+        bootstrap_peers = cfg.bootstrapPeers;
 
         s3_api = {
           # IPv4 overlay IP → no brackets (see rpc_bind_addr note above).

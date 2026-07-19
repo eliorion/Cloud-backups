@@ -21,6 +21,12 @@
     # exact rev is resolved into flake.lock by the operator's `nix flake lock`.
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
 
+    # nixos-25.05 is FROZEN at tailscale 1.82.5 (a release channel gets only
+    # backports, and tailscale is not backported). Pull JUST the tailscale package
+    # from 25.11 (1.90.9) via the overlay below (tailscaleOverlay) — a surgical
+    # client bump; the rest of every host closure stays on 25.05. Renovate-tracked.
+    nixpkgs-tailscale.url = "github:NixOS/nixpkgs/nixos-25.11";
+
     disko = {
       url = "github:nix-community/disko";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -84,11 +90,20 @@
       sopsPurego = withPurego pkgs.sops;
       agePurego = withPurego pkgs.age;
 
+      # Surgical tailscale bump: 25.05 is frozen at 1.82.5, so replace ONLY the
+      # tailscale package fleet-wide with 25.11's (1.90.9). services.tailscale
+      # (modules/tailscale.nix) uses pkgs.tailscale, so overriding it here updates
+      # tailscaled on every node without moving any other package off 25.05.
+      tailscaleOverlay = _final: _prev: {
+        tailscale = inputs.nixpkgs-tailscale.legacyPackages.${system}.tailscale;
+      };
+
       # Modules every host shares. Per-host disko + hardware are added in
       # hosts/*.nix. Modules here self-gate on `fleet.role` (garage.nix branches
       # storage/gateway; zfs-sanoid.nix is storage-only) rather than being
       # imported by hand per host.
       commonModules = [
+        { nixpkgs.overlays = [ tailscaleOverlay ]; }
         disko.nixosModules.disko
         sops-nix.nixosModules.sops
         ./modules/base.nix
