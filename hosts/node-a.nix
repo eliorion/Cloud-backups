@@ -69,6 +69,7 @@
   fleet = {
     role = "storage";
     zone = "onsite";
+    garageCapacity = "700GB"; # advertised to the Garage layout (fleet layout apply)
     proxyNode = false; # onsite node carries NO Tailscale scraper-egress proxy
     # Fleet default = prompt-unlock (doc 04). Kept false to match the rest of the
     # fleet. NOTE: flipping this to true is NOT sufficient to auto-unlock dpool on

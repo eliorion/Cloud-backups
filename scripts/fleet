@@ -40,6 +40,11 @@
 #   fleet status  [<node>]      Readiness + lifecycle state per node.
 #   fleet secrets               Edit / verify / git-add the encrypted secrets.
 #   fleet config tailnet <name> Set the MagicDNS tailnet in flake.nix.
+#   fleet layout <show|apply>   Garage cluster layout (zone + capacity per node).
+#                               apply reads each host's fleet.zone + fleet.garageCapacity,
+#                               fetches live node ids, and assigns + applies version+1
+#                               from the workstation (layout is imperative cluster state,
+#                               not garage.toml). Needs all layout nodes up (quorum).
 #   fleet buckets <keygen|apply|status|browse>
 #                               Declarative Garage S3 buckets + access keys for the
 #                               backup consumers (etcd + CNPG). keygen mints the key
@@ -1090,6 +1095,73 @@ CFG
   "${rc[@]}" serve http "garage:$bucket" --config "$cfg" --addr "$addr" --read-only || true
 }
 
+# ============================================================================= layout
+# Garage cluster LAYOUT (zone + capacity per node) is imperative, versioned cluster
+# state — it CANNOT live in garage.toml. This drives it from the DECLARATIVE spec in
+# each host's .nix (fleet.zone + fleet.garageCapacity): assign every storage node its
+# role, then apply as version+1. Run once, or whenever the topology changes. The
+# apply needs cluster QUORUM, so every node already in the layout must be up.
+cmd_layout() {
+  case "${1:-}" in
+    show)  shift; layout_show  "$@";;
+    apply) shift; layout_apply "$@";;
+    ""|-h|--help) note "usage: fleet layout <show|apply>";;
+    *) die "unknown layout subcommand: $1 (show|apply)";;
+  esac
+}
+
+layout_show() {
+  need ssh
+  local host; host="$(reachable_storage_node)" || die "no storage node reachable with garage up."
+  hdr "garage layout @ $host"
+  ssh -o BatchMode=yes -o ConnectTimeout=8 "root@$host" \
+    'garage -c /etc/garage.toml layout show' 2>&1 | sed 's/^/  /'
+}
+
+# Assign each storage node from its .nix (fleet.zone + fleet.garageCapacity), then
+# apply version+1. Node ids are fetched LIVE (they are runtime state, not in Nix).
+# Idempotent: re-assigning an unchanged role stages nothing, so apply is skipped
+# when there are no staged changes.
+layout_apply() {
+  need ssh; require_nix layout
+  tailnet_set || die "set the tailnet first: fleet config tailnet <name>"
+  local host; host="$(reachable_storage_node)" || die "no storage node reachable with garage up."
+  hdr "layout apply (spec from each host's fleet.zone + fleet.garageCapacity)"
+
+  local node zone cap nid staged=0
+  for node in node-a node-b node-c; do
+    { [[ -f "$HOSTS/$node.nix" ]] && flake_has_node "$node"; } || continue
+    cap="$(nix eval --raw ".#nixosConfigurations.$node.config.fleet.garageCapacity" 2>/dev/null || true)"
+    [[ -n "$cap" && "$cap" != "null" ]] || { note "$node: no fleet.garageCapacity — skipping (not a storage member)."; continue; }
+    zone="$(nix eval --raw ".#nixosConfigurations.$node.config.fleet.zone" 2>/dev/null || true)"
+    [[ -n "$zone" && "$zone" != "null" ]] || { warn "$node: fleet.zone unset — skipping."; continue; }
+    nid="$(ssh -o BatchMode=yes -o ConnectTimeout=6 "root@$(deploy_host "$node")" \
+             'garage -c /etc/garage.toml node id -q 2>/dev/null' | cut -d@ -f1)"
+    [[ -n "$nid" ]] || { warn "$node: unreachable / garage down — cannot fetch node id (apply needs ALL nodes up)."; continue; }
+    note "assign $node  id=$nid  zone=$zone  cap=$cap"
+    ssh -o BatchMode=yes -o ConnectTimeout=8 "root@$host" \
+      "garage -c /etc/garage.toml layout assign $nid -z $zone -c $cap" 2>&1 | sed 's/^/    /'
+    staged=1
+  done
+  [[ $staged == 1 ]] || { note "nothing to assign."; return; }
+
+  # Re-assigning identical roles stages nothing — only apply if garage staged a change.
+  if ! ssh -o BatchMode=yes -o ConnectTimeout=8 "root@$host" \
+        'garage -c /etc/garage.toml layout show' 2>/dev/null | grep -qi 'staged'; then
+    ok "no layout changes to apply (roles already current)."
+    return
+  fi
+  local ver next
+  ver="$(ssh -o BatchMode=yes -o ConnectTimeout=8 "root@$host" \
+          'garage -c /etc/garage.toml layout show' 2>/dev/null | grep -oiP 'layout version: \K[0-9]+')"
+  next=$((ver + 1))
+  warn "apply as version $next — needs cluster QUORUM (every node in the layout must be up)."
+  confirm "apply layout v$next now?" || { note "staged, NOT applied. Later: garage layout apply --version $next"; return; }
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "root@$host" \
+    "garage -c /etc/garage.toml layout apply --version $next" 2>&1 | sed 's/^/  /'
+  ok "layout applied (v$next)."
+}
+
 # ============================================================================= secrets
 cmd_secrets() {
   while :; do
@@ -1493,6 +1565,7 @@ cmd_menu() {
     8) guide <node>     on-box fallback runbook
     9) unlock <node>    feed ZFS passphrase to a locked node
     b) buckets          S3 buckets + keys (keygen / apply / status / browse)
+    L) layout           Garage cluster layout (show / apply from .nix)
     q) quit
 EOF
     local c; c="$(ask 'choice')"
@@ -1510,6 +1583,7 @@ EOF
       b|B) local ba; ba="$(ask 'buckets: keygen / apply / status / browse <bucket>')"
            # shellcheck disable=SC2086
            cmd_buckets $ba || true; pause;;
+      l|L) cmd_layout "$(ask 'layout action (show/apply)')" || true; pause;;
       q|Q|"") echo "bye."; return 0;;
       *) warn "unknown choice"; pause;;
     esac
@@ -1530,6 +1604,7 @@ main() {
     secrets)  shift; cmd_secrets "$@";;
     config)   shift; cmd_config "$@";;
     buckets)  shift; cmd_buckets "$@";;
+    layout)   shift; cmd_layout "$@";;
     guide)    shift; cmd_guide "$@";;
     ""|menu)  cmd_menu;;
     -h|--help|help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//';;

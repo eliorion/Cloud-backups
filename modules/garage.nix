@@ -45,6 +45,18 @@ in
     description = "Other nodes' <pubkey>@<overlay_ip>:3901 for Garage bootstrap_peers (cluster gossip over the tailnet).";
   };
 
+  # Storage capacity this node advertises to the Garage LAYOUT (garage layout
+  # assign -c). Declared here so the layout spec lives in the host's .nix; read by
+  # `scripts/fleet layout`, which does the imperative assign + apply. NOT part of
+  # garage.toml — the layout is versioned cluster state, not node config, and cannot
+  # be set declaratively in Garage. null = gateway / not a storage member.
+  options.fleet.garageCapacity = lib.mkOption {
+    type = lib.types.nullOr lib.types.str;
+    default = null;
+    example = "1000GB";
+    description = "Capacity advertised to the Garage layout (garage layout assign -c; suffixes B/KB/MB/GB/TB). Read by scripts/fleet layout, not garage.toml.";
+  };
+
   config = {
     services.garage = {
       enable = true;

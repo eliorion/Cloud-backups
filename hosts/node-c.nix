@@ -35,6 +35,7 @@
   fleet = {
     role = "storage";
     zone = "offsite-2";
+    garageCapacity = "1000GB"; # advertised to the Garage layout (fleet layout apply)
     proxyNode = true; # carries the Tailscale scraper-egress proxy role
     zfsAutoUnlock = false; # prompt-unlock; no passphrase on box
     # TODO operator: node-C's tailscale0 overlay IP (100.x.x.C) — set AFTER join.
