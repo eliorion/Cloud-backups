@@ -40,16 +40,18 @@
 #   fleet status  [<node>]      Readiness + lifecycle state per node.
 #   fleet secrets               Edit / verify / git-add the encrypted secrets.
 #   fleet config tailnet <name> Set the MagicDNS tailnet in flake.nix.
-#   fleet buckets <keygen|apply|status>
+#   fleet buckets <keygen|apply|status|browse>
 #                               Declarative Garage S3 buckets + access keys for the
 #                               backup consumers (etcd + CNPG). keygen mints the key
 #                               material into secrets/s3-keys.enc.yaml (workstation-
 #                               only, NEVER on a node); apply creates the buckets +
 #                               imports the keys + grants them on a live storage node
 #                               (idempotent — the reprovision path); status shows the
-#                               live state. Edit the bucket/key spec in the buckets
-#                               section of this script.
-#   fleet guide   <node>        Print the on-box fallback runbook (doc 13).
+#                               live state; browse <bucket> opens a READ-ONLY web
+#                               object browser (ssh tunnel + rclone serve http on
+#                               localhost — no server on the cluster). Edit the
+#                               bucket/key spec in the buckets section of this script.
+#   fleet guide   <node>        Print the on-box fallback runbook (doc 04).
 #
 # Tool needs:
 #   new / secrets : nix (purego sops/age from the flake), openssl, git.
@@ -119,6 +121,13 @@ probe_garage() {
     "")     echo na ;; # unreachable / down
     *)      echo no ;; # inactive / failed
   esac
+}
+# Live tailscale0 IPv4 of a node over ssh (root@<node>, same alias/MagicDNS basis as
+# probe_garage). Echoes the IP, or empty if unreachable. Run in the background per
+# node so the whole fleet is probed in parallel.
+probe_tsip() {
+  ssh -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new \
+    "root@$1" 'tailscale ip -4 2>/dev/null | head -1' 2>/dev/null || true
 }
 ok()   { printf '%s✔%s %s\n' "$G" "$R" "$*"; }
 warn() { printf '%s⚠%s %s\n' "$Y" "$R" "$*"; }
@@ -696,7 +705,7 @@ done' || true
 
 # ============================================================================= unlock
 # Feed the ZFS passphrase to a node whose data pool is LOCKED (garage down after a
-# reboot — keylocation=prompt stores no key on the box, doc 12). Reads the
+# reboot — keylocation=prompt stores no key on the box, doc 03). Reads the
 # passphrase locally (hidden prompt, or one line from stdin for scripting), then
 # over ssh discovers every locked encryptionroot on the node and loads the key on
 # each with that ONE passphrase (npool/garage + dpool/garage share it), `zfs
@@ -869,9 +878,12 @@ cmd_config() {
 # ============================================================================= buckets
 # Declarative S3 bucket + key spec for the fleet — the SINGLE source of truth.
 # Edit here to add/rename a bucket or key.
-#   fleet buckets keygen   mint the key material into secrets/s3-keys.enc.yaml
-#   fleet buckets apply    create buckets + import keys + grant, on a live node
-#   fleet buckets status   show live buckets/keys/permissions
+#   fleet buckets keygen         mint the key material into secrets/s3-keys.enc.yaml
+#   fleet buckets apply          create buckets + import keys + grant, on a live node
+#   fleet buckets status         show live buckets/keys/permissions
+#   fleet buckets browse <bkt>   read-only web browser of a bucket's objects (ssh
+#                                tunnel + `rclone serve http` on localhost; no server
+#                                on the cluster; secret pulled from sops, torn down on exit)
 #
 # S3 keys are CONTROL-PLANE credentials: minted + stored ONLY on the workstation
 # (secrets/s3-keys.enc.yaml, encrypted to the fleet key, NEVER shipped to a node),
@@ -915,8 +927,9 @@ cmd_buckets() {
     keygen) shift; buckets_keygen "$@";;
     apply)  shift; buckets_apply  "$@";;
     status) shift; buckets_status "$@";;
-    ""|-h|--help) note "usage: fleet buckets <keygen|apply|status>";;
-    *) die "unknown buckets subcommand: $1 (keygen|apply|status)";;
+    browse) shift; buckets_browse "$@";;
+    ""|-h|--help) note "usage: fleet buckets <keygen|apply|status|browse>";;
+    *) die "unknown buckets subcommand: $1 (keygen|apply|status|browse)";;
   esac
 }
 
@@ -1016,6 +1029,67 @@ done'
   ssh -o BatchMode=yes -o ConnectTimeout=8 "root@$host" "$remote" | sed 's/^/  /'
 }
 
+# Read-only object browser for ONE bucket, in your web browser. NO server on the
+# cluster: opens an ssh port-forward to the node's garage S3 (tailscale0:3900),
+# then runs `rclone serve http` on localhost with a THROWAWAY config built from
+# sops. `rclone serve http` is read-only and --read-only makes that explicit, so an
+# RW bucket key cannot mutate anything through this UI. The tunnel + config are torn
+# down on exit; the secret never touches argv or a persisted file. Per-bucket keys
+# mean one key sees one bucket — browse is per-bucket by design (isolation intact).
+buckets_browse() {
+  local bucket="${1:-}" addr="${2:-127.0.0.1:8080}"
+  if [[ -z "$bucket" ]]; then
+    note "usage: fleet buckets browse <bucket> [listen-addr]"
+    note "buckets: ${BUCKETS[*]}"; return 1
+  fi
+  local b found=0; for b in "${BUCKETS[@]}"; do [[ "$b" == "$bucket" ]] && found=1; done
+  [[ $found == 1 ]] || die "unknown bucket: $bucket (known: ${BUCKETS[*]})"
+  need ssh; _purego_resolve
+  [[ -f "$S3KEYS" ]] || die "no S3 keys — run: fleet buckets keygen && fleet buckets apply"
+
+  # Which key grants this bucket (from the spec)?
+  local spec name idf secf bkts id="" secret="" keyname=""
+  for spec in "${S3_KEYS[@]}"; do
+    IFS=: read -r name idf secf bkts <<<"$spec"
+    case ",$bkts," in
+      *",$bucket,"*) keyname="$name"; id="$(s3_get "$idf")"; secret="$(s3_get "$secf")" ;;
+    esac
+  done
+  [[ -n "$id" && -n "$secret" ]] || die "no key for $bucket in the spec/sops — run: fleet buckets keygen."
+
+  # rclone: prefer PATH, else the (unpinned) nixpkgs build — fine for an interactive browser.
+  local rc=(rclone)
+  have rclone || { note "rclone not on PATH — using nix run nixpkgs#rclone"; rc=(nix run nixpkgs#rclone --); }
+
+  local host; host="$(reachable_storage_node)" || die "no storage node reachable with garage up."
+  local tsip; tsip="$(ssh -o BatchMode=yes -o ConnectTimeout=6 "root@$host" 'tailscale ip -4 2>/dev/null | head -1')"
+  [[ "$tsip" =~ ^[0-9.]+$ ]] || die "could not read $host's tailscale IP (is tailscale up on it?)."
+
+  hdr "buckets browse — $bucket (key $keyname, READ-ONLY) @ http://$addr"
+  local lport=13900 ctl cfg; ctl="$(mktemp -u)"; cfg="$(mktemp)"; chmod 600 "$cfg"
+  # shellcheck disable=SC2064
+  trap "ssh -S '$ctl' -O exit 'root@$host' 2>/dev/null || true; rm -f '$cfg'" RETURN INT TERM
+
+  note "ssh tunnel 127.0.0.1:$lport -> $host ($tsip:3900)..."
+  ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -M -S "$ctl" -f -N \
+      -L "127.0.0.1:$lport:$tsip:3900" "root@$host" \
+    || die "ssh tunnel failed (local port $lport busy? close any other browse session)."
+
+  cat >"$cfg" <<CFG
+[garage]
+type = s3
+provider = Other
+access_key_id = $id
+secret_access_key = $secret
+endpoint = http://127.0.0.1:$lport
+region = garage
+force_path_style = true
+CFG
+
+  ok "open http://$addr in your browser. Ctrl-C here to stop + tear down."
+  "${rc[@]}" serve http "garage:$bucket" --config "$cfg" --addr "$addr" --read-only || true
+}
+
 # ============================================================================= secrets
 cmd_secrets() {
   while :; do
@@ -1112,6 +1186,7 @@ cmd_status() {
   for node in "${nodes[@]}"; do
     if [[ -f "$STATE_DIR/installed-$node" ]]; then
       probe_garage "$node" >"$gdir/$node" &
+      probe_tsip   "$node" >"$gdir/$node.tsip" &
     else
       echo na >"$gdir/$node"
     fi
@@ -1131,6 +1206,22 @@ cmd_status() {
     printf '  %s      ' "$(mk "$(cat "$gdir/$node" 2>/dev/null || echo na)")"
     printf '\n'
   done
+
+  # --- tailnet addresses: each node's live tailscale0 IP (falls back to the
+  # declared fleet.tailscaleIp) + its MagicDNS name. Handy for ssh / S3 endpoints.
+  if tailnet_set; then
+    local live decl magic show src
+    printf '\n  %s%-8s %-17s %-28s %s%s\n' "$B" 'NODE' 'TAILSCALE IP' 'MAGICDNS' 'SRC' "$R"
+    for node in "${nodes[@]}"; do
+      live="$(cat "$gdir/$node.tsip" 2>/dev/null || true)"
+      decl="$(grep -oP 'tailscaleIp = "\K[^"]+' "$HOSTS/$node.nix" 2>/dev/null | head -1)"
+      magic="$(deploy_host "$node")"
+      if   [[ -n "$live" ]]; then show="$live"; src="${G}live${R}"
+      elif [[ -n "$decl" ]]; then show="$decl"; src="${D}declared${R}"
+      else show='-'; src="${D}-${R}"; fi
+      printf '  %-8s %-17s %-28s %b\n' "$node" "$show" "$magic" "$src"
+    done
+  fi
   rm -rf "$gdir"
   printf '  %s%s  %s✓%s ready  %s✗%s missing  %s·%s not-yet%s\n' \
     "$D" 'legend:' "$G" "$D" "$RED" "$D" "$D" "$D" "$R"
@@ -1141,7 +1232,7 @@ cmd_status() {
 # ============================================================================= guide
 cmd_guide() {
   local node; node="$(canon "${1:-node-a}")"; local type; type="$(type_of "$node" 2>/dev/null || echo '?')"
-  hdr "on-box fallback runbook — $node (full: documentations/13-node-a-b-install.md)"
+  hdr "on-box fallback runbook — $node (full: documentations/04-node-a-b-install.md)"
   cat <<EOF
   Preferred path is remote:   fleet install $node root@<installer-ip>
   Console/USB fallback (no network install):
@@ -1354,7 +1445,7 @@ disko_template_D() { cat <<'EOF'
 # hosts/disko-@NODE@.nix — TYPE D gateway: boot + root only, UNENCRYPTED (no data
 # pool, no moat). Scaffolded by scripts/fleet. ⚠️ DESTROYS the disk.
 # NOTE: an EXISTING production gateway must be reconfigured ADDITIVELY — do NOT
-# import this disko in place (CLAUDE.md / doc 10 Phase 3).
+# import this disko in place (CLAUDE.md / doc 01 Phase 3).
 { ... }:
 {
   disko.devices.disk.main = {
@@ -1401,7 +1492,7 @@ cmd_menu() {
     7) config tailnet   set MagicDNS tailnet
     8) guide <node>     on-box fallback runbook
     9) unlock <node>    feed ZFS passphrase to a locked node
-    b) buckets          S3 buckets + keys (keygen / apply / status)
+    b) buckets          S3 buckets + keys (keygen / apply / status / browse)
     q) quit
 EOF
     local c; c="$(ask 'choice')"
@@ -1416,7 +1507,9 @@ EOF
       7) cmd_config tailnet "$(ask 'tailnet name')" || true; pause;;
       8) cmd_guide "$(ask 'node')" || true; pause;;
       9) cmd_unlock "$(ask 'node')" || true; pause;;
-      b|B) cmd_buckets "$(ask 'buckets action (keygen/apply/status)')" || true; pause;;
+      b|B) local ba; ba="$(ask 'buckets: keygen / apply / status / browse <bucket>')"
+           # shellcheck disable=SC2086
+           cmd_buckets $ba || true; pause;;
       q|Q|"") echo "bye."; return 0;;
       *) warn "unknown choice"; pause;;
     esac
