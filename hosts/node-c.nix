@@ -38,7 +38,7 @@
     proxyNode = true; # carries the Tailscale scraper-egress proxy role
     zfsAutoUnlock = false; # prompt-unlock; no passphrase on box
     # TODO operator: node-C's tailscale0 overlay IP (100.x.x.C) — set AFTER join.
-    tailscaleIp = "100.64.0.12";
+    tailscaleIp = "100.92.142.13";
 
     # Cluster gossip: A (onsite) + B (offsite-1) `garage node id`s. Persists the
     # peering across reboots so C re-forms the cluster over the tailnet on boot.
