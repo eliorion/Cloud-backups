@@ -40,6 +40,13 @@
     # TODO operator: node-C's tailscale0 overlay IP (100.x.x.C) — set AFTER join.
     tailscaleIp = "100.64.0.12";
 
+    # Cluster gossip: A (onsite) + B (offsite-1) `garage node id`s. Persists the
+    # peering across reboots so C re-forms the cluster over the tailnet on boot.
+    bootstrapPeers = [
+      "aef46cd13cbcf4045114bae5d36bbfcf16c5dc774ef12610e59f5c2014acd594@100.122.58.119:3901" # node-a
+      "211f2649528a4b96f9ce8f4bab58531777d96fdd7859633ff02b7f7f4aba9556@100.122.210.124:3901" # node-b
+    ];
+
     # TODO operator: LAN subnet this proxy advertises (scraper-egress role),
     # e.g. [ "192.168.1.0/24" ]. Leave [] until you wire the proxy route.
     advertiseRoutes = [ ];

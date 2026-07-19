@@ -87,6 +87,12 @@
     # TODO operator: node-A's tailscale0 overlay IP — set AFTER first join (doc 13).
     tailscaleIp = "100.122.58.119";
 
+    # Cluster gossip: every OTHER node's `garage node id`. B (offsite-1) here; add
+    # C (offsite-2) once it is installed. Persists the peering across reboots.
+    bootstrapPeers = [
+      "211f2649528a4b96f9ce8f4bab58531777d96fdd7859633ff02b7f7f4aba9556@100.122.210.124:3901" # node-b
+    ];
+
     # ALL Garage data is on the HDD dpool now — the NVMe wpool is the dev
     # workstation pool (../modules/workstation.nix), NOT Garage. Single data_dir.
     # Capacity ≈ usable space; tune after `zpool list`.
