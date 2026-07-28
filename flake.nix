@@ -109,6 +109,7 @@
         ./modules/base.nix
         ./modules/sops.nix
         ./modules/tailscale.nix
+        ./modules/scrape-proxy.nix
         ./modules/garage.nix
         ./modules/zfs-sanoid.nix
         ./modules/garage-ops.nix

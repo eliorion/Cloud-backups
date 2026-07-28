@@ -36,7 +36,11 @@
     role = "storage";
     zone = "offsite-2";
     garageCapacity = "1000GB"; # advertised to the Garage layout (fleet layout apply)
-    proxyNode = true; # carries the Tailscale scraper-egress proxy role
+    # Exit-node / subnet-router role RETIRED — scraping egress is served by the
+    # per-request HTTP proxy below, not by a Tailscale exit node (which is
+    # per-client and cannot be rotated). Withdrawal is applied by extraSetFlags
+    # in modules/tailscale.nix, not extraUpFlags — see the note there.
+    proxyNode = false;
     zfsAutoUnlock = false; # prompt-unlock; no passphrase on box
     # TODO operator: node-C's tailscale0 overlay IP (100.x.x.C) — set AFTER join.
     tailscaleIp = "100.64.0.12";
@@ -51,6 +55,12 @@
     # TODO operator: LAN subnet this proxy advertises (scraper-egress role),
     # e.g. [ "192.168.1.0/24" ]. Leave [] until you wire the proxy route.
     advertiseRoutes = [ ];
+
+    # HTTP egress proxy for the scraping system — reachable over the tailnet only,
+    # exits via node-C's own offsite-2 residential IP (modules/scrape-proxy.nix).
+    # Independent of proxyNode above: that advertises a Tailscale exit node, which
+    # is per-client and cannot be rotated per request.
+    scrapeProxy.enable = true;
 
     # Garage spans NVMe (ssd) + HDD, matching node-A's ~75%-of-usable ratio so the
     # pool keeps ~25% headroom for garage/meta + 90 days of sanoid snapshots (the

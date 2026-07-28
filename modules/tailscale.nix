@@ -45,21 +45,30 @@ in
       # A and gateway D do not route for others.
       useRoutingFeatures = if isProxy then "both" else "none";
 
-      extraUpFlags =
-        [
-          # Tag every fleet device tag:garage so the deny-by-default ACL applies.
-          "--advertise-tags=tag:garage"
-          "--ssh=false"
-        ]
-        ++ lib.optionals isProxy [
-          "--advertise-exit-node"
-        ]
+      # LOGIN-time flags only. The nixpkgs module runs `tailscale up` from
+      # tailscaled-autoconnect.service ONLY when the backend state is NeedsLogin /
+      # NeedsMachineAuth — so anything here is applied ONCE, at first join, and
+      # editing it later is a silent no-op on a node that is already logged in.
+      # Identity/tagging belongs here; anything that must stay declarative does not.
+      extraUpFlags = [
+        # Tag every fleet device tag:garage so the deny-by-default ACL applies.
+        "--advertise-tags=tag:garage"
+        "--ssh=false"
+      ];
+
+      # ROLE flags — these must converge on EVERY activation, not just first join,
+      # or flipping fleet.proxyNode = false leaves the exit-node advertisement
+      # (0.0.0.0/0 + ::/0) live in tailscaled's persisted prefs forever. The module
+      # runs these via tailscaled-set.service, which is unconditional. Both flags are
+      # emitted with an EXPLICIT value in both directions so the pref is declarative:
+      # false/empty actively WITHDRAWS a previously advertised exit node / route.
+      extraSetFlags = [
+        "--advertise-exit-node=${lib.boolToString isProxy}"
         # Subnet route(s) for the scraper-egress role come from fleet.advertiseRoutes
-        # (set per host). Must match the role this node carries; approve in the ACL
-        # (doc 01 Phase 2). Empty list → no --advertise-routes flag emitted.
-        ++ lib.optionals (isProxy && cfg.advertiseRoutes != [ ]) [
-          "--advertise-routes=${lib.concatStringsSep "," cfg.advertiseRoutes}"
-        ];
+        # (set per host); approve in the ACL (doc 01 Phase 2). Empty list → the flag
+        # is still emitted with an empty value, which CLEARS any advertised route.
+        "--advertise-routes=${lib.concatStringsSep "," cfg.advertiseRoutes}"
+      ];
     };
 
     # IP forwarding is required for subnet-router / exit-node nodes.
