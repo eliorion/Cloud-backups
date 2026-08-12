@@ -8,7 +8,7 @@
 # what an IP-rotating scraper needs. The two are independent; this module neither
 # sets nor clears fleet.proxyNode.
 #
-# ── STAGED behind fleet.scrapeProxy.enable (default FALSE), like fleet.netbird ──
+# ── STAGED behind fleet.scrapeProxy.enable (default FALSE), like fleet.secureBoot ──
 # Off = no daemon, no listener, no behaviour change.
 #
 # ── NETWORK RULE (doc 00 §3/§5), same as every Garage listener ──

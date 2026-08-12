@@ -1,224 +1,316 @@
-# garage-fleet — standalone NixOS fleet for the Garage backup cluster
+<div align="center">
 
-A 4-node, geo-distributed, ransomware-resistant **Garage** S3 object store on
-**NixOS + ZFS**, deployed with **disko + nixos-anywhere + deploy-rs + sops-nix**.
-It is the durable DR target for the prod Talos cluster (etcd snapshots, CNPG
-Postgres PITR, selected Longhorn PVCs).
+# `garage-fleet`
 
-This repo is a **SEPARATE TRUST DOMAIN** from the prod cluster (different OS,
-identities, network posture, control plane) — that separation is the whole point
-(doc 09 §2, ADR-1). It is **not** joined to prod and **not** a second Kubernetes
-cluster.
+**A geo-distributed, ransomware-resistant S3 backup vault — four NixOS machines across three sites, defined entirely as code.**
 
-**Authoritative design + plan** (in the prod repo):
+*Built to be the disaster-recovery target for a production Kubernetes cluster, in a trust domain that cluster cannot reach.*
 
-- `documentations/09-garage-backup-cluster.md` — design + decision records (the *why*).
-- `documentations/10-garage-backup-implementation-plan.md` — phased runbook (the *how*).
+![NixOS](https://img.shields.io/badge/NixOS-25.05-5277C3?style=flat-square&logo=nixos&logoColor=white)
+![ZFS](https://img.shields.io/badge/OpenZFS-native%20encryption-0B5FA5?style=flat-square)
+![Garage](https://img.shields.io/badge/Garage-S3%20object%20store-2E7D32?style=flat-square)
+![Tailscale](https://img.shields.io/badge/Tailscale-deny--by--default%20ACL-1D1D1D?style=flat-square&logo=tailscale&logoColor=white)
+![SOPS](https://img.shields.io/badge/SOPS%20%2B%20age-sops--nix-6E4AA8?style=flat-square)
+![deploy-rs](https://img.shields.io/badge/deploy--rs-magic%20rollback-B7410E?style=flat-square&logo=rust&logoColor=white)
+![License](https://img.shields.io/badge/license-Unlicense-lightgrey?style=flat-square)
 
-Read those first. This README is the fleet-side quickstart only. The whole node
-lifecycle is driven by one tool — **`scripts/fleet`** (see Quickstart below).
+</div>
 
 ---
 
-## Layout
+## The one-sentence thesis
+
+> **A backup that shares etcd, PKI, cluster-admin, or trust domain with the system it protects dies with that system.**
+
+Everything in this repository is downstream of that sentence. The backup tier runs a different OS
+(NixOS, not Talos), holds different identities (its own `age` keys, not the cluster PKI), sits behind a
+different network posture, and has no shared control plane. Ransomware that takes cluster-admin on
+production gets the S3 *write* key — and still cannot touch the history.
+
+---
+
+## Architecture
+
+Three storage nodes, one per geographic zone (a full mirror), plus a data-less gateway that is the only
+S3 entrypoint production ever talks to. Every listener binds the Tailscale overlay IP — never `0.0.0.0`.
+
+```mermaid
+flowchart TB
+  subgraph PROD["PRODUCTION — Talos k8s + Flux (the thing being protected)"]
+    ETCD["etcd snapshots<br/>restic-encrypted"]
+    CNPG["CNPG Postgres<br/>WAL + base backups"]
+    VELERO["Velero + Kopia<br/>Longhorn PVCs"]
+  end
+
+  subgraph NET["TAILNET — deny-by-default ACL, tag:k8s reaches tcp:3900 and nothing else"]
+    ND["node-D · GATEWAY<br/>capacity 0 · routes, stores nothing"]
+
+    subgraph Z1["zone: onsite"]
+      NA["node-A<br/>storage + devcontainer host<br/>LUKS/TPM2 + Secure Boot"]
+    end
+    subgraph Z2["zone: offsite-1"]
+      NB["node-B<br/>storage + egress proxy"]
+    end
+    subgraph Z3["zone: offsite-2"]
+      NC["node-C<br/>storage + egress proxy"]
+    end
+  end
+
+  ETCD -->|"tcp:3900 S3 only"| ND
+  CNPG -->|"tcp:3900 S3 only"| ND
+  VELERO -->|"tcp:3900 S3 only"| ND
+  ND -.->|"S3 routing, no data"| NA
+  NA <-->|"RPC 3901 · gossip replication"| NB
+  NB <--> NC
+  NC <--> NA
+
+  classDef prod fill:#8B1E1E,stroke:#5c1414,color:#fff
+  classDef store fill:#1F6FEB,stroke:#144a9e,color:#fff
+  classDef gw fill:#6E4AA8,stroke:#4a3175,color:#fff
+  class ETCD,CNPG,VELERO prod
+  class NA,NB,NC store
+  class ND gw
+```
+
+| Port | Purpose | Bind | Reachable by production? |
+|---|---|---|---|
+| `3900` | S3 API | `tailscale0` only | **yes** — the only port the cluster needs |
+| `3901` | Garage RPC / gossip | `tailscale0` only | **no** — RPC reach means joining the cluster |
+| `3903` | Admin API **and** metrics | `tailscale0` only, token-gated | **no** — this is the layout/key/bucket control plane, not a metrics endpoint |
+
+---
+
+## The moat: why immutability lives in ZFS, not in S3
+
+Garage has **no S3 Object Lock and no object versioning**. That is not a footnote — it dictates the
+entire defence. If the object store cannot enforce immutability, immutability has to be built *around*
+it, at a layer no S3 credential and no tailnet identity can address.
+
+```mermaid
+flowchart LR
+  ATK["Full prod compromise<br/>cluster-admin + S3 write key"]
+  API["Garage S3 API :3900"]
+  LIVE["Live objects<br/>deletable ✗"]
+  DS["ZFS dataset<br/>dpool/garage"]
+  SNAP["Read-only snapshots<br/>sanoid, separate OS identity"]
+  ROOT["Needs OS root on 3 nodes<br/>across 3 sites, simultaneously"]
+
+  ATK --> API --> LIVE
+  LIVE -.->|"same blocks on disk"| DS
+  DS --> SNAP
+  ATK --x SNAP
+  SNAP --> ROOT
+
+  classDef bad fill:#8B1E1E,stroke:#5c1414,color:#fff
+  classDef good fill:#1B5E20,stroke:#0f3d14,color:#fff
+  class ATK,LIVE bad
+  class SNAP,ROOT good
+```
+
+Five real layers, in order of who they stop:
+
+| # | Layer | What it actually stops |
+|---|---|---|
+| 1 | **Client-side encryption** before upload (restic / Kopia paths) | A stolen node or stolen bucket leaks ciphertext only |
+| 2 | **ZFS read-only snapshots**, pruned by `sanoid` under a separate OS identity | An S3 key that deletes every object cannot touch history — *the only real immutability tier* |
+| 3 | **Separation of duties**: the `garage` service user holds **zero** `zfs allow` | The process that holds the S3 credentials cannot destroy or roll back a snapshot |
+| 4 | **Network isolation**: deny-by-default ACL, tailnet-only listeners | Lateral movement, RPC peering, internet exposure |
+| 5 | **3-2-1-1-0** with automated restore drills | Backups that silently stopped working weeks ago |
+
+**Honest limitation, stated in the design doc rather than hidden:** object-level separation of duties
+does *not* exist here. `restic forget --prune` needs a write grant on the same bucket plus the repo
+password, so the pruning identity can delete objects. Retention is best-effort; the security control is
+Layer 2 and nothing else.
+
+---
+
+## Design trade-offs
+
+Every decision below is recorded as an ADR in [`documentations/00`](documentations/00-garage-backup-cluster.md#4-decision-records)
+with its rejected alternatives. The fourth column is the one that matters — what each choice *costs*.
+
+| Decision | Rejected | Why | **Price paid** |
+|---|---|---|---|
+| **4 standalone nodes**, not a second k8s cluster | Join prod · build a second Talos cluster | Shared fate is the whole threat. And etcd cannot span a WAN — quorum thrash, split-brain | No orchestrator, no scheduler. The node lifecycle had to be written by hand: a 1 700-line CLI |
+| **NixOS + ZFS** | Debian · Fedora CoreOS · Talos | Atomic rollback, no config drift, and ZFS *is* the moat | Steep Nix learning curve. CoreOS would have won outright if ZFS were not mandatory — ZFS fights the ostree image model |
+| **Garage** | MinIO · Ceph | Gossip membership (no Raft quorum to co-locate), WAN-native, zone-aware replication, tiny ops footprint | No Object Lock, no versioning — immutability must be rebuilt at the ZFS layer (above) |
+| **deploy-rs** | colmena · Ansible · NixOps | Magic rollback auto-reverts a bad firewall/`tailscaled` change on an unreachable offsite node in ~30 s | No protection on the *first* push (no canary baseline), and no support for passphrase-protected SSH keys |
+| **SOPS + age + sops-nix** | HashiCorp Vault / OpenBao | A secrets manager for a *backup* system is a circular dependency: it is stateful, must be unsealed, and must itself be backed up — useless during the disaster you need it for | Offline out-of-band key custody is a manual control, and key loss is unrecoverable |
+| **ZFS native encryption** | LUKS | Enables `zfs send -w` raw replication — an offsite vault can hold still-encrypted blocks without the key | Leaks pool-level metadata: dataset names, snapshot names, sizes |
+| **`keylocation=prompt`** | Auto-unlock at boot | A stolen powered-on box stays ciphertext (see *changed my mind #3*) | Every reboot needs a human — which is why `fleet unlock` exists |
+| **node-A doubles as a dev host** | Keep all three nodes boring | One machine, two jobs: onsite storage *and* a remote devcontainer host driven from a Mac | Root Docker is root-equivalent, so **node-A's moat is deliberately forfeited**. B and C hold the real moat and must never take this role |
+
+### node-A: two trust domains on one machine
+
+The sharpest trade in the repo is "the box must reboot unattended" versus "a stolen box must stay
+locked". Resolved by splitting node-A across two disks with two different unlock models:
+
+| Disk | Contents | Unlock | Protects against |
+|---|---|---|---|
+| NVMe — LUKS2 `cryptwork` | root, home, Docker | **TPM2, PCR-7 bound, unattended in initrd** + lanzaboote signed UKIs | Powered-off media theft. The box rejoins the mesh with no operator present |
+| HDD — ZFS-native `dpool` | **all of Garage** | **`keylocation=prompt`**, unlocked over the mesh after boot | Whole-box theft, powered on or off. This is the moat |
+
+Passphrase count equals the number of encryption domains needing a human-held secret: node-A has two,
+node-B and node-C have one each. None of them is stored anywhere on the fleet — they live in a password
+manager and one offline physical copy, and `keylocation=prompt` has no recovery path.
+
+---
+
+## Three things I changed my mind about
+
+Design docs record the plan. These record the plan meeting reality.
+
+### 1. Rosetta silently corrupted every secret in the repo
+
+The workstation devcontainer is `x86_64` **emulated on an Apple Silicon Mac**. Rosetta mis-translates
+Go's hand-written assembly ChaCha20-Poly1305. Stock `sops`/`age` therefore produced ciphertext that was
+perfectly self-consistent — it decrypted on the workstation — and that **no real node could read**.
+The only symptom was at first boot, far from the cause:
+
+```
+sops-install-secrets: 0 successful groups required, got 0
+```
+
+…and every secret-fed service (`garage`, `tailscaled`) starved. X25519 and AES-GCM survive Rosetta;
+only that one assembly path is wrong. The fix is in [`flake.nix`](flake.nix): rebuild `sops` and `age`
+with `-tags=purego` to drop the assembly for the generic Go path, and route *every* encrypt-side call —
+`scripts/fleet`, `mise.toml`, `secrets/gen-secrets.sh` — through those builds. Verified against
+RFC 8439 vectors.
+
+### 2. The per-node identity could not decrypt at boot
+
+The original design derived each node's `age` identity from its SSH host key via `ssh-to-age`. Elegant —
+one key, no extra material to manage — and it did not work: the `ssh-to-age` implementation bundled in
+sops-nix could not decrypt at activation time, so the very first `switch` failed. Replaced with a
+**dedicated `age` key per node**, minted *before* install and seeded by `nixos-anywhere --extra-files`
+into `/var/lib/sops-nix/key.txt`. The SSH host key is now not seeded at all — `sshd` generates its own.
+Fewer moving parts than the clever version.
+
+### 3. "Node theft" was a claim the design could not back
+
+The design doc originally accepted `keylocation=file://` with the ZFS passphrase persisted through
+sops-nix — and then said the design defended against node theft. It did not. The node's `age` identity
+lives on the same disk as the ciphertext, so a stolen box carries both halves and unlocks its own
+backups. Worse, it was the *worst* of both worlds on the offsite nodes: the passphrase was stored **and**
+still typed at reboot.
+
+Changed to `keylocation=prompt`, with **no passphrase in any SOPS file, ever** — and built
+`fleet unlock` so an offsite reboot is one command over SSH instead of a site visit. The cost (a manual
+step per reboot) is now paid deliberately, and the threat-model table says what at-rest encryption
+actually buys.
+
+---
+
+## One command for the whole lifecycle
+
+`scripts/fleet` is the single workstation entrypoint — a 1 700-line Bash CLI with a TUI, written because
+"no shared-fate orchestrator" means no orchestrator at all.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> Scaffolded: fleet new
+    Scaffolded --> Installed: fleet install
+    note right of Installed
+      nixos-anywhere + disko
+      passphrase → installer RAM only
+    end note
+    Installed --> Running: fleet finalize
+    Running --> Running: fleet deploy
+    Running --> Running: fleet buckets add
+    Running --> Previous: fleet rollback
+    Previous --> Running: fleet deploy
+    Running --> Locked: reboot
+    Locked --> Running: fleet unlock
+```
+
+| Command | What it does |
+|---|---|
+| `fleet new <node>` | Mints the node's dedicated age key, its Tailscale auth key, its `.sops.yaml` rule, and scaffolds `hosts/*.nix` — idempotent |
+| `fleet install <node> root@<ip>` | Bare-metal provision over SSH (disko + nixos-anywhere). Feeds the ZFS passphrase to the installer's **tmpfs only**, then restores prompt-unlock |
+| `fleet deploy <node>` | deploy-rs push with magic rollback. `--detached` activates under PID 1 so a `tailscaled` change survives restarting its own transport |
+| `fleet unlock <node>` | Finds every locked encryption root over SSH, loads the key, mounts, starts Garage. Passphrase travels on stdin only |
+| `fleet layout <show\|apply>` | Reads each host's declared zone + capacity, fetches live node IDs, applies `version+1` once |
+| `fleet buckets add <bucket>` | Declares a bucket in `buckets.spec`, mints it a **dedicated** key, pushes it, prints the k8s Secret |
+| `fleet status` | Readiness, lifecycle state, and a live SSH probe of each node's `garage.service` |
+
+**One dedicated S3 key per bucket** ([`buckets.spec`](buckets.spec)): a leaked key exposes exactly one
+consumer's backups, and a compromised prod workload cannot read another cluster's bucket. The spec is
+Git-tracked (names only); the key material lives in a SOPS file encrypted to the **workstation key
+alone** — never to a node.
+
+---
+
+## Current state, honestly
+
+The design target and what is actually running are not the same thing, and the repo says so out loud.
+
+| | Design target | Running today |
+|---|---|---|
+| Storage nodes in layout | A + B + C | **A + C** — node-B offline long-term, config retained |
+| Replication factor | 3 (one copy per zone) | **2** — rf cannot exceed the distinct zone count |
+| Garage version | v2.3.0 | **2.1.0** — `nixos-25.05` ships no `garage_2_3_0` attribute; needs an input bump or overlay |
+| Secure Boot | lanzaboote signed UKIs fleet-wide | **node-A only** (`fleet.secureBoot = true`). B/C/D stay on systemd-boot — each needs its own physical firmware-enrollment trip, which cannot be done over SSH |
+| node-D gateway | additive reconfigure of a live prod box | **not yet wired** — commented out of the flake until its hardware config exists, so `nix flake check` stays green |
+| Backup jobs | etcd CronJob, CNPG ObjectStore, Velero | Live in the **prod** repo under Flux — deliberately not here |
+
+---
+
+## Reading this repo in five minutes
+
+| Start here | Why |
+|---|---|
+| [`documentations/00`](documentations/00-garage-backup-cluster.md) §2 + §4 | The threat model and all six ADRs, each with its rejected alternatives |
+| [`flake.nix`](flake.nix) | A `hosts` attrset derives every `nixosConfiguration`, a per-node `-install` variant, and the deploy-rs map — adding a node is one line |
+| [`modules/zfs-sanoid.nix`](modules/zfs-sanoid.nix) | The moat, with the invariant that makes it real written above the code |
+| [`hosts/disko-node-a.nix`](hosts/disko-node-a.nix) | Two trust domains expressed as one declarative disk layout |
+| [`scripts/fleet`](scripts/fleet) | The lifecycle CLI |
+
+> **Note on placeholder values.** This is a public mirror of a live fleet. The Tailscale
+> tailnet name, the per-node overlay IPs, the Garage node IDs, and the operator SSH key are
+> replaced with placeholders (`<tailnet>`, `100.64.0.1x`, `aaaa…`/`bbbb…`, `operator@workstation`).
+> Everything else is the real configuration. Set your own with `fleet config tailnet <name>` and
+> the `fleet.tailscaleIp` option per host. Encrypted `secrets/*.enc.yaml` are committed on
+> purpose — a flake only sees Git-tracked files, so a gitignored secret is invisible to sops-nix
+> at activation. No private key material has ever been committed to this repository.
+
+### Layout
 
 ```
 garage-fleet/
-  scripts/fleet             # ONE entrypoint: new / install / deploy / status (this doc)
-  flake.nix                 # inputs; a `hosts` attrset derives nixosConfigurations
-                            #   (+ per-node `-install` variants) and the deploy-rs map
-  .sops.yaml                # FLEET recipients (separate from the prod cluster's)
-  private-keys/             # gitignored: fleet age key + per-node SSH host keys
-  secrets/
-    gen-secrets.sh                      # (legacy) manual fleet-key + token minting
-    common.enc.yaml.example            # TEMPLATE: rpc_secret + admin/metrics tokens
-    node.enc.yaml.example    # TEMPLATE: per-node tag:garage auth key
-  modules/
-    base.nix        # ssh hardening, nftables firewall, users, boot gens, nix
-    sops.nix        # sops-nix wiring (age from SSH host key), secret entries
-    garage.nix      # services.garage + garage.toml, listeners on the tailnet
-    zfs-sanoid.nix  # ZFS + sanoid RO snapshot moat + autoScrub (storage nodes)
-    tailscale.nix   # services.tailscale, authkey, tags, proxy toggle
-    workstation.nix # node-A ONLY: rootless-podman DevPod host (unprivileged dev user)
-  hosts/
-    node-a.nix      # onsite   storage + workstation
-    node-b.nix      # offsite-1 storage + proxy
-    node-c.nix      # offsite-2 storage + proxy
-    node-d.nix      # gateway  (capacity 0, no data, no zone)
-    disko-node-a.nix   # node-A: unencrypted NVMe wpool (dev) + encrypted HDD dpool
-    disko-node-b.nix   # node-B: encrypted NVMe npool + encrypted HDD dpool
-    disko-storage.nix  # node-C: single encrypted ZFS pool
-    disko-gateway.nix  # simple boot+root, no data pool (greenfield D rebuild only)
+├── flake.nix              # hosts attrset → nixosConfigurations + -install variants + deploy map
+├── buckets.spec           # declarative S3 buckets, one dedicated key each (names only, not secret)
+├── modules/
+│   ├── base.nix           # SSH hardening, nftables (trusts tailscale0 only), users, the fleet.* options
+│   ├── garage.nix         # services.garage; every listener bound to the overlay IP
+│   ├── zfs-sanoid.nix     # the moat: read-only snapshots, garage user holds zero zfs allow
+│   ├── secureboot.nix     # node-A only: lanzaboote UKIs + TPM2 LUKS unlock + enrollment runbook
+│   ├── sops.nix           # derives the per-node secret file from networking.hostName
+│   ├── workstation.nix    # node-A only: devcontainer host (and the reason its moat is forfeited)
+│   └── scrape-proxy.nix   # tailnet-only HTTP egress proxy, enabled on B/C
+├── hosts/                 # node-a…d + one disko file per machine
+├── secrets/               # SOPS-encrypted, committed (a flake only sees Git-tracked files)
+├── scripts/fleet          # the lifecycle CLI
+└── documentations/        # 8 documents: design + ADRs, phased runbook, per-node install guides
 ```
 
-Each storage host imports its disko file + `zfs-sanoid` + (via the flake)
-`garage` + `tailscale`; node-A also imports `workstation.nix`. The gateway
-imports no disko and no `zfs-sanoid`.
+### By the numbers
 
----
-
-## `flake.lock` — committed, and must stay that way
-
-`flake.lock` **is committed**, and pins every input (nixpkgs, disko, sops-nix,
-deploy-rs, nixos-anywhere) by rev. The devcontainer ships nix (flakes enabled),
-so it and `nix develop` work out of the box:
-
-```bash
-cd garage-fleet
-nix develop         # operator toolchain (sops/age/ssh-to-age/deploy-rs/nixos-anywhere)
-nix flake check     # evaluates configs + runs deploy-rs schema checks
-nix flake update    # bump every input; `nix flake lock` only fills gaps
-```
-
-Commit the lock whenever it changes. Renovate keeps the inputs current.
-
-⚠️ **Never gitignore `flake.lock`.** A flake's source is its git-tracked files,
-so an ignored lock is invisible to nix — it re-resolves every input to upstream
-HEAD on each command and silently pins nothing.
-
----
-
-## Quickstart — `scripts/fleet`
-
-`scripts/fleet` is the single workstation entrypoint for the node lifecycle (it
-replaced the old `bootstrap-node` + `deploy-node`). Run it bare for a TUI, or:
-
-```bash
-./scripts/fleet                                    # TUI menu (status + actions)
-./scripts/fleet new    node-a                      # §0: secrets + scaffold (idempotent; --force regens)
-./scripts/fleet config tailnet <name>              # set the deploy MagicDNS tailnet
-./scripts/fleet secrets                            # verify-all-encrypted + git add; then git commit
-./scripts/fleet install node-a root@<installer-ip> # §1: remote provision (nixos-anywhere)
-./scripts/fleet deploy  node-a                     # §2: apply a config change (deploy-rs + auto-rollback)
-./scripts/fleet status                             # readiness + lifecycle state per node
-```
-
-`new`/`secrets`/`status` run in the devcontainer (sops + age, **no nix**);
-`install`/`deploy` need **nix** — run them from a nix host. Without `--force`,
-`new` skips whatever already exists. Sections 0–2 below are what these commands
-do under the hood (and the console fallback).
-
----
-
-## 0. Secret bootstrap (doc 10 Phase 0)
-
-`./scripts/fleet new <node>` does all of the below — idempotently — minting the
-fleet age key, the shared secrets, the node's SSH host key (→ `private-keys/`),
-its `ssh-to-age` recipient (→ `.sops.yaml`), the Tailscale authkey, and
-`sops updatekeys`. The manual equivalent:
-
-```bash
-cd garage-fleet
-./secrets/gen-secrets.sh
-```
-
-This mints the **fleet** age keypair (a separate trust domain — never the prod
-`age137z0k…`/`age1heestk…` keys), prints the **recipient** to paste into
-`.sops.yaml`, and prints fresh `rpc_secret` / `admin_token` / `metrics_token`.
-Then:
-
-1. Paste the printed recipient into `.sops.yaml` (replace every `age1FLEET…`).
-2. `cp secrets/common.enc.yaml.example secrets/common.enc.yaml`, fill the
-   three values, `sops -e -i secrets/common.enc.yaml`.
-3. Mint a reusable, non-ephemeral, **tag:garage** auth key in the Tailscale
-   admin console; `cp secrets/node.enc.yaml.example
-   secrets/<node>.enc.yaml` per node, paste the key, `sops -e -i`.
-4. **Break-glass:** copy the fleet age **private** key, the ZFS passphrase, and
-   the restic/Kopia/age repo passwords offline to **two physical locations**
-   (doc 09 §8). These are catastrophic-loss; the ZFS key is unrecoverable from a
-   lost node fleet.
-
-Set the **Tailscale ACL** (deny-by-default, doc 09 §3): `tag:garage ↔ tag:garage`
-on `3900,3901,3903`; `tag:k8s → tag:garage` on **`tcp:3900` only** (never RPC
-`3901`, never admin `3903`).
-
----
-
-## 1. Provision (disko + nixos-anywhere) — doc 10 Phase 1/2
-
-Boot each new node (A/B/C) into a NixOS live/installer image with SSH-as-root, then:
-
-```bash
-./scripts/fleet install node-a root@<installer-ip>
-```
-
-`fleet install` prompts for the ZFS passphrase, uploads it to the installer's RAM
-only (`--disk-encryption-keys`, a tmpfs file — never written to disk), seeds the
-SSH host key (`--extra-files`), runs nixos-anywhere against the `.#node-a-install`
-variant, then restores `keylocation=prompt` post-boot over `ssh`. In effect:
-
-```bash
-nix run .#nixos-anywhere -- \
-  --flake .#node-a-install \
-  --disk-encryption-keys /tmp/fleet-zfs.key <passphrase-tmpfile> \
-  --extra-files <hostkey-tree> \   # seeds /etc/ssh/ssh_host_ed25519_key
-  root@<installer-ip>
-# extra args pass through after `--`, e.g.:
-#   ./scripts/fleet install node-a root@<ip> -- --generate-hardware-config nixos-generate-config hosts/node-a-hardware.nix
-```
-
-`fleet new` already added the node's `ssh-to-age` recipient to `.sops.yaml` and
-re-encrypted the shared secrets, so the box can decrypt at activation (doc 09 §8)
-— just commit before installing (a flake copies only git-tracked files). Then
-bring up the Garage layout imperatively (`garage layout assign … -z <zone>
--c <bytes>`, `garage layout apply --version <prev+1>` — exactly `prev+1`, once;
-doc 09 §5; `fleet guide <node>` prints the exact commands).
-
-**node-D is already in production** — reconfigure it **additively** (doc 10
-Phase 3): do **not** import `disko-gateway.nix` in place, add only
-`services.garage` (fleet.role=gateway). `garage layout assign <id-D> --gateway`.
-
----
-
-## 2. Deploy (deploy-rs, magic rollback) — doc 09 ADR-4
-
-```bash
-./scripts/fleet deploy node-a    # runs: nix run .#deploy-rs -- .#node-a
-./scripts/fleet rollback node-a  # escape hatch: switch the box to its previous generation
-```
-
-deploy-rs **magic rollback** auto-reverts a bad `tailscaled`/firewall change on a
-remote offsite node within ~30s. Caveats (doc 09 ADR-4): magic rollback only
-protects once a *prior* generation was also deployed by deploy-rs — do the first
-post-install deploy with console / initrd-SSH fallback available; and configure
-per-host SSH identities in `~/.ssh/config` keyed by the Tailscale MagicDNS name
-(neither deploy-rs nor colmena handle per-host/passphrase keys themselves).
-
----
-
-## Per-host placeholders to fill (search for `TODO operator:`)
-
-| Where | Placeholder |
+| | |
 |---|---|
-| `flake.nix` | `<tailnet>` MagicDNS name — set with `./scripts/fleet config tailnet <name>` |
-| `.sops.yaml` | fleet recipient `age1FLEET…`; each node's `ssh-to-age` recipient after install |
-| `modules/base.nix` | `ops` + `root` SSH authorized keys; `system.stateVersion` |
-| `modules/garage.nix` | `package = pkgs.garage_2` attr name on your nixpkgs; `bootstrap_peers` (peer pubkey@overlay:3901) |
-| `modules/tailscale.nix` | proxy `--advertise-routes=…` for B/C |
-| `hosts/disko-storage.nix` | boot/data disk device paths; zpool `mode`; offsite `keylocation=prompt` opt-in |
-| `hosts/disko-gateway.nix` | node-D OS disk device (greenfield only) |
-| `hosts/node-a/-b/-c/-d.nix` | `tailscaleIp` (overlay IP), `hostId` (unique 8-hex), per-node hardware import; Garage `-c <bytes>` capacity at layout time |
-
-Node summary:
-
-| Host | Zone | Role | Garage capacity | ZFS pool + sanoid | Proxy |
-|---|---|---|---|---|---|
-| node-a | onsite | storage | non-zero (`-c <bytes>`) | yes | no |
-| node-b | offsite-1 | storage | non-zero | yes | yes |
-| node-c | offsite-2 | storage | non-zero | yes | yes |
-| node-d | (none) | gateway | **0 / `--gateway`** | no | (existing prod role) |
+| Machines / sites / zones | 4 · 3 · 3 |
+| Nix | ~2 700 lines across 23 files — modules, host definitions, and disk layouts |
+| Lifecycle CLI | 1 761 lines of Bash, 12 subcommands, TUI |
+| Documentation | 8 documents, ~34 000 words — design records, runbooks, and per-node install guides |
+| Architecture decision records | 6, each with rejected alternatives |
 
 ---
 
-## Notes
+<div align="center">
 
-- **Garage version** is pinned to **v2.3.0** (via the nixpkgs input + the
-  `services.garage.package` attr); Renovate-tracked (doc 10 Phase 8).
-- **Garage has no Object Lock and no S3 versioning (v2.3.0)** — immutability is
-  the **ZFS snapshot moat** (`modules/zfs-sanoid.nix`), not any Garage feature.
-  The `garage` user must hold **no** `zfs allow` on `bpool/garage`; audit with
-  `zfs allow bpool/garage` (doc 09 §7, doc 10 Phase 5).
-- All Garage listeners (`3900/3901/3903`) bind the node's `tailscale0` overlay
-  IP only; the host firewall trusts only `tailscale0` (doc 09 §3).
-- The data-plane backup *jobs* (etcd CronJob, CNPG ObjectStore, Velero) live in
-  the **prod repo** under Flux, not here.
+**Stack** — NixOS 25.05 · OpenZFS · Garage S3 · disko · nixos-anywhere · deploy-rs · sops-nix · age ·
+Tailscale · sanoid · lanzaboote · systemd-cryptenroll · TPM2
+
+*Released into the public domain ([Unlicense](LICENSE)).*
+
+</div>
