@@ -18,8 +18,15 @@ tool, `scripts/fleet buckets`. **No node stores the S3 key material** and **no
 on-node reconciler exists** — the workstation (the devcontainer) is the control
 plane.
 
-- **Spec** (single source of truth): the `buckets` section near the top of
-  `scripts/fleet` — the `BUCKETS` list and the `S3_KEYS` lines.
+- **Spec** (single source of truth): `buckets.spec` at the repo root — one line per
+  bucket, git-tracked, **not** a secret (bucket and *field names* only):
+
+  ```
+  bucket : key-name : id-field : secret-field
+  ```
+
+  `fleet buckets add` appends to it; you rarely edit it by hand. The `*-field` names
+  are the flat keys used inside `secrets/s3-keys.enc.yaml`.
 - **Key material**: `secrets/s3-keys.enc.yaml`, encrypted to the **workstation age
   key ONLY** (`.sops.yaml` rule) — never shipped to any node. `fleet buckets`
   pushes it to a live node over ssh, just-in-time, at apply time.
@@ -27,6 +34,8 @@ plane.
 
   | command | what it does |
   |---|---|
+  | `fleet buckets add <bucket> [key-name]` | declare + mint + push a NEW bucket with its OWN key, then print its k8s Secret (all of the below in one shot) |
+  | `fleet buckets creds <bucket> [--k8s]` | reprint that bucket's credentials + endpoint (stdout only) |
   | `fleet buckets keygen` | mint any missing key material (offline, local, idempotent) |
   | `fleet buckets apply` | create buckets + import keys + grant, on a live node (idempotent, additive) |
   | `fleet buckets status` | show live buckets / keys / permissions |
@@ -36,7 +45,7 @@ plane.
 
 | bucket | key | grant | consumer |
 |---|---|---|---|
-| `etcd-backup` | `etcd-key` | RW | prod etcd snapshot CronJob |
+| `homelab-staging-etcd-backup` | `etcd-key` | RW | prod etcd snapshot CronJob |
 | `cnpg-staging-asp` | `cnpg-asp-key` | RW | CNPG cluster `staging-asp` (barman) |
 | `cnpg-staging-fbref` | `cnpg-fbref-key` | RW | CNPG cluster `staging-fbref` (barman) |
 
@@ -59,43 +68,31 @@ delete the bucket, change config, manage keys). Pruning is manual on the node.
 
 ## Add a new bucket
 
-Example: add a bucket `velero` with its own key `velero-key`.
-
-### 1. Edit the spec in `scripts/fleet`
-
-In the `buckets` section, add the bucket and a key line:
+One command. Example: a new CNPG cluster `staging-newapp` needs its own bucket and
+its own dedicated key.
 
 ```bash
-BUCKETS=(etcd-backup cnpg-staging-asp cnpg-staging-fbref velero)   # <- add velero
-
-S3_KEYS=(
-  "etcd-key:s3_etcd_id:s3_etcd_secret:etcd-backup"
-  "cnpg-asp-key:s3_cnpg_asp_id:s3_cnpg_asp_secret:cnpg-staging-asp"
-  "cnpg-fbref-key:s3_cnpg_fbref_id:s3_cnpg_fbref_secret:cnpg-staging-fbref"
-  "velero-key:s3_velero_id:s3_velero_secret:velero"                # <- add this
-)
+./scripts/fleet buckets add cnpg-staging-newapp
 ```
 
-Format is `name : id-field : secret-field : bucket[,bucket,...]`. The `*_field`
-names are the flat keys used inside `secrets/s3-keys.enc.yaml`.
+That does, in order:
 
-### 2. Mint the key material (offline)
+1. **Validates** the name against S3/Garage rules (lowercase `a-z0-9.-`, 3–63
+   chars, no `_`, no `..`) — before touching anything.
+2. **Declares** it in `buckets.spec` with a **dedicated key**. The key name
+   defaults to `<bucket>-key` (override as a 2nd argument) and the sops field names
+   are derived from the bucket: `s3_cnpg_staging_newapp_id` /
+   `…_secret`. Nothing to invent by hand.
+3. **Mints** that key offline into `secrets/s3-keys.enc.yaml` — `GK…` id + 64-hex
+   secret. Existing keys are kept, **never** regenerated.
+4. **Applies** to a live storage node: creates the bucket, imports the key with its
+   fixed id+secret, grants `--read --write`. If no node is reachable it says so and
+   tells you to run `fleet buckets apply` later — the spec and key are already safe
+   on disk.
+5. **Prints** the ready-to-paste k8s Secret + `ObjectStore` endpoint (see below).
 
-```bash
-./scripts/fleet buckets keygen
-```
-
-Mints `GK…` id + 64-hex secret for any **missing** key (existing keys are kept,
-never regenerated) into `secrets/s3-keys.enc.yaml`.
-
-### 3. Apply to the cluster
-
-```bash
-./scripts/fleet buckets apply
-```
-
-Creates the bucket, imports the key with its fixed id+secret, grants `--read
---write`. Idempotent and **additive**.
+Re-running `add` for a bucket that already exists is **safe**: it re-declares
+nothing, re-mints nothing, and just reconciles the cluster.
 
 > ⚠️ **Both storage nodes must be up.** Creating/deleting a bucket or key is a
 > **global-metadata write** and needs cluster quorum. With one node down at the
@@ -104,28 +101,60 @@ Creates the bucket, imports the key with its fixed id+secret, grants `--read
 > HEALTHY. (This eases to quorum 2/3 once node-c joins and rf=3 — see
 > `01-garage-backup-implementation-plan.md`.)
 
-### 4. Commit the encrypted secret
+### Commit the spec + the encrypted secret
 
 ```bash
-./scripts/fleet secrets      # choice 'v' verifies + stages s3-keys.enc.yaml
-git commit -m "fleet: add velero bucket + key"
+./scripts/fleet secrets      # choice 'v' verifies + stages buckets.spec & s3-keys.enc.yaml
+git commit -m "fleet: add cnpg-staging-newapp bucket + key"
 ```
 
 `secrets/s3-keys.enc.yaml` is committed **encrypted** (a flake copies only
-git-tracked files; the values stay encrypted to the workstation key).
+git-tracked files; the values stay encrypted to the workstation key). `buckets.spec`
+is plain text — it holds no key material.
 
-### 5. Hand the key to the consumer (prod repo)
+### Hand the key to the consumer (prod repo)
 
-Retrieve the plaintext to wire prod's k8s Secret + your password manager:
+`add` already printed it; to get it again:
 
 ```bash
-nix run .#sops -- -d secrets/s3-keys.enc.yaml
+./scripts/fleet buckets creds cnpg-staging-newapp --k8s   # CNPG-shaped Secret
+./scripts/fleet buckets creds cnpg-staging-newapp         # plain id / secret / endpoint
+```
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cnpg-staging-newapp-s3
+  namespace: <ns>          # fill in
+type: Opaque
+stringData:
+  ACCESS_KEY_ID: GK…
+  ACCESS_SECRET_KEY: …
+# ObjectStore: endpointURL http://<node>.<tailnet>.ts.net:3900   (any storage node serves S3)
+#              destinationPath s3://cnpg-staging-newapp/   ·   region garage · path-style
+```
+
+Secret material goes to **stdout only**, never to a file — it lands in your
+scrollback, so paste it and clear. The raw dump still works:
+`nix run .#sops -- -d secrets/s3-keys.enc.yaml`.
+
+### If a run stops half-way
+
+`add` is just the four steps above, each idempotent and separately runnable — the
+spec line survives, so pick up where it stopped:
+
+```bash
+./scripts/fleet buckets keygen    # mint only what is missing
+./scripts/fleet buckets apply     # push every declared bucket + key (additive)
 ```
 
 ### Removing a bucket or key
 
-`fleet buckets apply` is **additive** — it never prunes. Removing a line from the
-spec does **not** delete anything live. Delete by hand on a node (needs quorum):
+`fleet buckets apply` is **additive** — it never prunes. Removing a line from
+`buckets.spec` does **not** delete anything live (and leaves its now-orphaned
+fields in `secrets/s3-keys.enc.yaml` — drop them with `sops edit`). Delete by hand
+on a node (needs quorum):
 
 ```bash
 ssh root@<node>.<tailnet>.ts.net 'garage -c /etc/garage.toml key delete --yes <GK…>'
@@ -147,7 +176,8 @@ tcp:3900`; your workstation over the tailnet).
 Get a key's id/secret:
 
 ```bash
-nix run .#sops -- -d secrets/s3-keys.enc.yaml
+./scripts/fleet buckets creds <bucket>            # one bucket, with its endpoint
+nix run .#sops -- -d secrets/s3-keys.enc.yaml     # or the whole file
 ```
 
 ### aws CLI
@@ -178,7 +208,7 @@ force_path_style = true
 
 ```bash
 rclone ls   garage:cnpg-staging-asp
-rclone tree garage:etcd-backup
+rclone tree garage:homelab-staging-etcd-backup
 ```
 
 ### Web browser (no server, no config) — `fleet buckets browse`

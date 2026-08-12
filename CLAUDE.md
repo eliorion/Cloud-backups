@@ -18,7 +18,8 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
 - `documentations/02-node-b-image-flash.md`, `03-node-b-usb-install.md`,
   `04-node-a-b-install.md`, `05-node-a-secure-pipeline.md` — node provisioning.
 - `documentations/06-garage-buckets-guide.md` — declarative S3 buckets + keys
-  (`fleet buckets`): add a bucket, access it with a key.
+  (`fleet buckets`, spec in `buckets.spec`): add a bucket with its OWN key in one
+  command (`fleet buckets add <bucket>`), access it with that key.
 
 > Docs 00/01 were authored in the prod repo and bundled here; their bare
 > `documentations/0X-*.md` references and Flux/k8s paths point at the prod repo,
@@ -66,6 +67,10 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
   `node.enc.yaml.example`; `s3-keys.enc.yaml` = the Garage S3 access keys
   (etcd + CNPG buckets), encrypted to the **workstation key ONLY** (never a node),
   managed by `fleet buckets` (doc 06).
+- `buckets.spec` — the declarative bucket/key spec (`bucket : key-name : id-field :
+  secret-field`, one line per bucket, one DEDICATED key each). Git-tracked and NOT a
+  secret — names only; the key material is `secrets/s3-keys.enc.yaml`. Append with
+  `fleet buckets add <bucket>`, not by hand (doc 06).
 - `.sops.yaml` — **FLEET** age recipients (separate trust domain from prod)
 
 Node roles: `node-a` onsite storage; `node-b` offsite-1 storage+proxy; `node-c`

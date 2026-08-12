@@ -45,17 +45,21 @@
 #                               fetches live node ids, and assigns + applies version+1
 #                               from the workstation (layout is imperative cluster state,
 #                               not garage.toml). Needs all layout nodes up (quorum).
-#   fleet buckets <keygen|apply|status|browse>
+#   fleet buckets <add|creds|keygen|apply|status|browse>
 #                               Declarative Garage S3 buckets + access keys for the
-#                               backup consumers (etcd + CNPG). keygen mints the key
+#                               backup consumers (etcd + CNPG), one DEDICATED key per
+#                               bucket. add <bucket> is the one-shot path for a new
+#                               CNPG cluster: declare it in buckets.spec, mint its own
+#                               key, push it, print the k8s Secret. creds <bucket>
+#                               [--k8s] reprints those credentials. keygen mints key
 #                               material into secrets/s3-keys.enc.yaml (workstation-
 #                               only, NEVER on a node); apply creates the buckets +
 #                               imports the keys + grants them on a live storage node
 #                               (idempotent — the reprovision path); status shows the
 #                               live state; browse <bucket> opens a READ-ONLY web
 #                               object browser (ssh tunnel + rclone serve http on
-#                               localhost — no server on the cluster). Edit the
-#                               bucket/key spec in the buckets section of this script.
+#                               localhost — no server on the cluster). The bucket/key
+#                               spec is buckets.spec at the repo root.
 #   fleet guide   <node>        Print the on-box fallback runbook (doc 04).
 #
 # Tool needs:
@@ -90,7 +94,12 @@ INSTALL_LUKS_KEYFILE_REMOTE="/tmp/fleet-luks.key"
 # Fleet age private key (decrypts sops as the workstation). In-repo copy first
 # (private-keys/, gitignored), then the XDG location, then env override.
 FLEET_AGE_KEY_FILE="${FLEET_AGE_KEY_FILE:-$PRIVKEYS/garage-fleet.txt}"
-[[ -f "$FLEET_AGE_KEY_FILE" ]] || FLEET_AGE_KEY_FILE="$HOME/.config/sops/age/garage-fleet.txt"
+# Fall through to the XDG copy only when the in-repo key is ABSENT. A present-but-
+# UNREADABLE key (wrong uid after a devcontainer rebuild) is kept, so the error from
+# fleet_age_key_ok names the file you actually have to fix. That state is the
+# dangerous one: sops -d fails, and a caller that does not check its exit status
+# sees EMPTY plaintext.
+[[ -e "$FLEET_AGE_KEY_FILE" ]] || FLEET_AGE_KEY_FILE="$HOME/.config/sops/age/garage-fleet.txt"
 export SOPS_AGE_KEY_FILE="$FLEET_AGE_KEY_FILE"
 
 FORCE=0
@@ -143,6 +152,19 @@ ask()  { local p="$1" d="${2:-}" a; read -rp "$p${d:+ [$d]}: " a; printf '%s' "$
 confirm() { local a; read -rp "$1 [y/N]: " a; [[ "$a" =~ ^[Yy]$ ]]; }
 pause() { read -rsp "Press Enter to continue…" _; echo; }
 die()  { err "$*"; exit 1; }
+# Guard for every path that DECRYPTS: report the real cause instead of a wall of
+# sops "Group 0: FAILED" output, and stop BEFORE anything overwrites a secret file.
+fleet_age_key_ok() {
+  [[ -r "$FLEET_AGE_KEY_FILE" ]] && return 0
+  err "fleet age key not readable: $FLEET_AGE_KEY_FILE"
+  if [[ -e "$FLEET_AGE_KEY_FILE" ]]; then
+    note "it exists but uid $(id -u) cannot read it ($(stat -c 'uid=%u gid=%g mode=%a' "$FLEET_AGE_KEY_FILE" 2>/dev/null))."
+    note "fix ownership, e.g.:  sudo chown -R $(id -u):$(id -g) '$PRIVKEYS'"
+  else
+    note "it does not exist — restore it from the password manager (it CANNOT be regenerated)."
+  fi
+  die "refusing to continue: nothing can be decrypted without it."
+}
 
 have() { command -v "$1" >/dev/null 2>&1; }
 need() { have "$1" || die "required tool not found: $1"; }
@@ -881,8 +903,10 @@ cmd_config() {
 }
 
 # ============================================================================= buckets
-# Declarative S3 bucket + key spec for the fleet — the SINGLE source of truth.
-# Edit here to add/rename a bucket or key.
+# The bucket + key spec lives in ../buckets.spec (git-tracked, NOT a secret) — the
+# SINGLE source of truth. One DEDICATED key per bucket.
+#   fleet buckets add <bkt>      declare + mint + push a NEW bucket with its own key
+#   fleet buckets creds <bkt>    print that bucket's credentials (--k8s = Secret yaml)
 #   fleet buckets keygen         mint the key material into secrets/s3-keys.enc.yaml
 #   fleet buckets apply          create buckets + import keys + grant, on a live node
 #   fleet buckets status         show live buckets/keys/permissions
@@ -896,17 +920,37 @@ cmd_config() {
 # one node neither exposes nor blocks the S3 creds, and after ANY rebuild `fleet
 # buckets apply` restores identical buckets + credentials (prod jobs never re-wire).
 S3KEYS="$SECRETS/s3-keys.enc.yaml"
-BUCKETS=(etcd-backup cnpg-staging-asp cnpg-staging-fbref)
-# name : id-field : secret-field : bucket[,bucket...]   (fields = flat keys in $S3KEYS)
-# One key PER bucket — a leaked key exposes only its own cluster's backups, and a
-# compromised prod consumer cannot reach the other cluster's bucket. NOTE: garage
-# has only read/write/owner — --write includes DeleteObject (no delete-less grant);
-# object immutability is the ZFS snapshot moat, not the key ACL.
-S3_KEYS=(
-  "etcd-key:s3_etcd_id:s3_etcd_secret:etcd-backup"
-  "cnpg-asp-key:s3_cnpg_asp_id:s3_cnpg_asp_secret:cnpg-staging-asp"
-  "cnpg-fbref-key:s3_cnpg_fbref_id:s3_cnpg_fbref_secret:cnpg-staging-fbref"
-)
+SPEC="$ROOT/buckets.spec"
+# Populate BUCKETS + S3_KEYS from $SPEC. One key PER bucket — a leaked key exposes
+# only its own cluster's backups, and a compromised prod consumer cannot reach the
+# other cluster's bucket. NOTE: garage has only read/write/owner — --write includes
+# DeleteObject (no delete-less grant); object immutability is the ZFS snapshot moat,
+# not the key ACL.
+BUCKETS=(); S3_KEYS=()
+trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
+buckets_load() {
+  [[ -f "$SPEC" ]] || die "bucket spec not found: $SPEC"
+  BUCKETS=(); S3_KEYS=()
+  local line bucket name idf secf seen=" " n=0
+  while IFS= read -r line; do
+    n=$((n+1))
+    line="${line%%#*}"
+    [[ "$line" =~ [^[:space:]] ]] || continue
+    IFS=: read -r bucket name idf secf <<<"$line"
+    bucket="$(trim "$bucket")"; name="$(trim "$name")"
+    idf="$(trim "$idf")"; secf="$(trim "$secf")"
+    [[ -n "$bucket" && -n "$name" && -n "$idf" && -n "$secf" ]] \
+      || die "$SPEC:$n — need 4 colon-separated fields (bucket : key : id-field : secret-field)"
+    [[ "$seen" == *" $bucket "* ]] && die "$SPEC:$n — duplicate bucket: $bucket"
+    [[ "$seen" == *" $name "*   ]] && die "$SPEC:$n — duplicate key name: $name"
+    [[ "$seen" == *" $idf "* || "$seen" == *" $secf "* ]] \
+      && die "$SPEC:$n — field name already used by another bucket: $idf/$secf"
+    seen+="$bucket $name $idf $secf "
+    BUCKETS+=("$bucket")
+    S3_KEYS+=("$name:$idf:$secf:$bucket")
+  done < "$SPEC"
+  [[ ${#BUCKETS[@]} -gt 0 ]] || die "$SPEC declares no buckets"
+}
 
 # Read one flat field from the (workstation-only) encrypted S3 key file.
 s3_get() { sops -d --extract "[\"$1\"]" "$S3KEYS" 2>/dev/null || true; }
@@ -928,27 +972,125 @@ reachable_storage_node() {
 }
 
 cmd_buckets() {
+  buckets_load
   case "${1:-}" in
+    add)    shift; buckets_add    "$@";;
+    creds)  shift; buckets_creds  "$@";;
     keygen) shift; buckets_keygen "$@";;
     apply)  shift; buckets_apply  "$@";;
     status) shift; buckets_status "$@";;
     browse) shift; buckets_browse "$@";;
-    ""|-h|--help) note "usage: fleet buckets <keygen|apply|status|browse>";;
-    *) die "unknown buckets subcommand: $1 (keygen|apply|status|browse)";;
+    ""|-h|--help) note "usage: fleet buckets <add|creds|keygen|apply|status|browse>";;
+    *) die "unknown buckets subcommand: $1 (add|creds|keygen|apply|status|browse)";;
   esac
+}
+
+# Declare a NEW bucket with its OWN key, mint the key, and push it to the cluster.
+# Idempotent end to end: re-running for an existing bucket re-applies (never remints,
+# never duplicates the spec line). Key name defaults to <bucket>-key; the sops field
+# names are derived from the bucket, so nothing has to be invented by hand.
+buckets_add() {
+  local bucket="${1:-}" name="${2:-}"
+  [[ -n "$bucket" ]] || { note "usage: fleet buckets add <bucket> [key-name]"; return 1; }
+  # S3/Garage bucket naming: lowercase alnum, '-' and '.', 3-63 chars, no '..'.
+  [[ "$bucket" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ && "$bucket" != *..* ]] \
+    || die "invalid bucket name: $bucket (lowercase a-z0-9.- , 3-63 chars, no '_', no '..')"
+  hdr "buckets add: $bucket"
+
+  local b known=0
+  for b in "${BUCKETS[@]}"; do [[ "$b" == "$bucket" ]] && known=1; done
+  if [[ $known == 1 ]]; then
+    note "$bucket already declared in $SPEC — reconciling only."
+  else
+    local slug="${bucket//[^a-z0-9]/_}"
+    name="${name:-${bucket}-key}"
+    printf '%s : %s : s3_%s_id : s3_%s_secret\n' "$bucket" "$name" "$slug" "$slug" >> "$SPEC"
+    ok "registered  $bucket -> $name  (fields s3_${slug}_id / s3_${slug}_secret)"
+    buckets_load   # re-read: validates the line we just wrote (dupe key/field names)
+  fi
+
+  buckets_keygen
+
+  local host=""   # resolved once, reused by apply + creds (each probe costs an ssh)
+  if host="$(reachable_storage_node)"; then
+    buckets_apply "$host"
+  else
+    warn "no storage node reachable with garage up — bucket NOT created on the cluster."
+    note "  fleet buckets apply        # run once a node is up"
+  fi
+  note "bucket + key creation is a global-metadata write: it needs cluster QUORUM."
+
+  buckets_creds "$bucket" --k8s "$host"
+  hdr "commit"
+  note "  fleet secrets  (choice v)  # stages buckets.spec + the ENCRYPTED s3-keys.enc.yaml"
+  note "  git commit -m 'fleet: add $bucket bucket + key'"
+}
+
+# Print ONE bucket's credentials for its consumer. --k8s emits a CNPG-shaped Secret.
+# Secret material goes to STDOUT only — never to a file. $3 is an already-resolved
+# endpoint host (internal, from buckets_add) so we don't re-probe the fleet.
+buckets_creds() {
+  local bucket="${1:-}" fmt="${2:-}" host="${3:-}"
+  if [[ -z "$bucket" ]]; then
+    note "usage: fleet buckets creds <bucket> [--k8s]"
+    note "buckets: ${BUCKETS[*]}"; return 1
+  fi
+  _purego_resolve; fleet_age_key_ok
+  [[ -f "$S3KEYS" ]] || die "no S3 keys yet — run: fleet buckets add $bucket"
+
+  local spec name idf secf bkt id="" secret="" keyname=""
+  for spec in "${S3_KEYS[@]}"; do
+    IFS=: read -r name idf secf bkt <<<"$spec"
+    [[ "$bkt" == "$bucket" ]] || continue
+    keyname="$name"; id="$(s3_get "$idf")"; secret="$(s3_get "$secf")"
+  done
+  [[ -n "$keyname" ]] || die "unknown bucket: $bucket (known: ${BUCKETS[*]})"
+  [[ -n "$id" && -n "$secret" ]] || die "no key material for $bucket — run: fleet buckets keygen"
+
+  # Any storage node serves S3; prefer a live one, else name node-a as the endpoint.
+  [[ -n "$host" ]] || host="$(reachable_storage_node)" || host="$(deploy_host node-a)"
+
+  hdr "buckets creds — $bucket (key $keyname)"
+  warn "SECRET material below — it is now in your scrollback. Paste, then clear."
+  if [[ "$fmt" == "--k8s" ]]; then
+    cat <<YAML
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${bucket}-s3
+  namespace: <ns>          # fill in
+type: Opaque
+stringData:
+  ACCESS_KEY_ID: $id
+  ACCESS_SECRET_KEY: $secret
+# ObjectStore: endpointURL http://$host:3900   (any storage node serves S3)
+#              destinationPath s3://$bucket/   ·   region garage · path-style
+YAML
+  else
+    cat <<TXT
+  bucket    $bucket
+  key       $keyname
+  id        $id
+  secret    $secret
+  endpoint  http://$host:3900   (region garage, path-style)
+TXT
+  fi
 }
 
 # Mint any MISSING S3 key material into $S3KEYS. Idempotent — a present key is
 # NEVER overwritten (that would orphan the live cluster + prod creds). Pure
 # workstation-local: GK+24hex id + 64hex secret (garage's format), no node needed.
 buckets_keygen() {
-  need openssl; _purego_resolve
+  need openssl; _purego_resolve; fleet_age_key_ok
   local tmp; tmp="$(mktemp)"; chmod 600 "$tmp"
   # shellcheck disable=SC2064
   trap "rm -f '$tmp'" RETURN
   if [[ -f "$S3KEYS" ]]; then
     encrypted "$S3KEYS" || die "$S3KEYS exists but is PLAINTEXT — refusing to touch it."
-    sops -d "$S3KEYS" > "$tmp"
+    # MUST be checked: on a failed decrypt $tmp stays EMPTY, every field then looks
+    # "missing", and the cp below would overwrite LIVE credentials with fresh ones.
+    sops -d "$S3KEYS" > "$tmp" \
+      || die "cannot decrypt $S3KEYS — refusing to remint (that would overwrite the live keys)."
   fi
   hdr "buckets keygen -> $S3KEYS"
   local spec name idf secf rest field val changed=0
@@ -981,9 +1123,10 @@ buckets_keygen() {
 # material travels over ssh STDIN (never argv). This is the reprovision path:
 # run it after a rebuild to restore identical buckets + credentials cluster-wide.
 buckets_apply() {
-  need ssh; _purego_resolve
+  need ssh; _purego_resolve; fleet_age_key_ok
   [[ -f "$S3KEYS" ]] || die "no S3 keys yet — run: fleet buckets keygen"
-  local host; host="$(reachable_storage_node)" \
+  local host="${1:-}"   # optional: already-resolved host (from buckets_add)
+  [[ -n "$host" ]] || host="$(reachable_storage_node)" \
     || die "no storage node reachable with garage up (check: fleet status / fleet unlock <node>)."
   hdr "buckets apply -> $host"
 
@@ -1005,16 +1148,20 @@ while read -r kind body; do
   esac
 done'
 
+  # Build the manifest FIRST, in this shell: a `die` inside a `{ … } | ssh` pipeline
+  # would only kill the subshell, and apply would report success having pushed no key.
+  local man; man="$(mktemp)"; chmod 600 "$man"
+  # shellcheck disable=SC2064
+  trap "rm -f '$man'" RETURN
   local spec name idf secf bkts id secret
-  {
-    printf 'BUCKETS %s\n' "${BUCKETS[*]}"
-    for spec in "${S3_KEYS[@]}"; do
-      IFS=: read -r name idf secf bkts <<<"$spec"
-      id="$(s3_get "$idf")"; secret="$(s3_get "$secf")"
-      [[ -n "$id" && -n "$secret" ]] || die "missing $idf/$secf in $S3KEYS — run: fleet buckets keygen"
-      printf 'KEY %s %s %s %s\n' "$name" "$id" "$secret" "$bkts"
-    done
-  } | ssh -o BatchMode=yes -o ConnectTimeout=10 "root@$host" "$remote" | sed 's/^/  /'
+  printf 'BUCKETS %s\n' "${BUCKETS[*]}" > "$man"
+  for spec in "${S3_KEYS[@]}"; do
+    IFS=: read -r name idf secf bkts <<<"$spec"
+    id="$(s3_get "$idf")"; secret="$(s3_get "$secf")"
+    [[ -n "$id" && -n "$secret" ]] || die "missing $idf/$secf in $S3KEYS — run: fleet buckets keygen"
+    printf 'KEY %s %s %s %s\n' "$name" "$id" "$secret" "$bkts" >> "$man"
+  done
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "root@$host" "$remote" < "$man" | sed 's/^/  /'
   ok "buckets applied on $host (cluster-wide state; other nodes gossip it)."
 }
 
@@ -1049,7 +1196,7 @@ buckets_browse() {
   fi
   local b found=0; for b in "${BUCKETS[@]}"; do [[ "$b" == "$bucket" ]] && found=1; done
   [[ $found == 1 ]] || die "unknown bucket: $bucket (known: ${BUCKETS[*]})"
-  need ssh; _purego_resolve
+  need ssh; _purego_resolve; fleet_age_key_ok
   [[ -f "$S3KEYS" ]] || die "no S3 keys — run: fleet buckets keygen && fleet buckets apply"
 
   # Which key grants this bucket (from the spec)?
@@ -1179,8 +1326,8 @@ cmd_secrets() {
       e*) local n="${choice#e }"; n="${n// /}"; [[ "$n" =~ ^[0-9]+$ ]] && sops "${files[$((n-1))]}" || warn "give an index, e.g. 'e 1'";;
       v)  local bad; bad="$(grep -L '^sops:' "$SECRETS"/*.enc.yaml 2>/dev/null || true)"
           if [[ -n "$bad" ]]; then err "PLAINTEXT files — NOT staging:"; printf '   %s\n' $bad
-          else git -C "$ROOT" add .sops.yaml "$SECRETS"/*.enc.yaml flake.nix hosts/ 2>/dev/null
-               ok "staged .sops.yaml + encrypted secrets + flake/hosts"; git -C "$ROOT" status --short | sed 's/^/   /'
+          else git -C "$ROOT" add .sops.yaml "$SECRETS"/*.enc.yaml buckets.spec flake.nix hosts/ 2>/dev/null
+               ok "staged .sops.yaml + encrypted secrets + buckets.spec + flake/hosts"; git -C "$ROOT" status --short | sed 's/^/   /'
                note "now: git commit -m 'fleet: add/update node secrets'"; fi;;
       r)  for f in "${files[@]}"; do sops --config "$SOPS_YAML" updatekeys -y "$f" >/dev/null && ok "updatekeys $(basename "$f")"; done;;
       q|"") return;;
@@ -1564,7 +1711,7 @@ cmd_menu() {
     7) config tailnet   set MagicDNS tailnet
     8) guide <node>     on-box fallback runbook
     9) unlock <node>    feed ZFS passphrase to a locked node
-    b) buckets          S3 buckets + keys (keygen / apply / status / browse)
+    b) buckets          S3 buckets + keys (add / creds / keygen / apply / status / browse)
     L) layout           Garage cluster layout (show / apply from .nix)
     q) quit
 EOF
@@ -1580,7 +1727,7 @@ EOF
       7) cmd_config tailnet "$(ask 'tailnet name')" || true; pause;;
       8) cmd_guide "$(ask 'node')" || true; pause;;
       9) cmd_unlock "$(ask 'node')" || true; pause;;
-      b|B) local ba; ba="$(ask 'buckets: keygen / apply / status / browse <bucket>')"
+      b|B) local ba; ba="$(ask 'buckets: add <bucket> / creds <bucket> [--k8s] / keygen / apply / status / browse <bucket>')"
            # shellcheck disable=SC2086
            cmd_buckets $ba || true; pause;;
       l|L) cmd_layout "$(ask 'layout action (show/apply)')" || true; pause;;
