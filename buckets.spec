@@ -14,3 +14,4 @@ cnpg-staging-asp            : cnpg-asp-key   : s3_cnpg_asp_id   : s3_cnpg_asp_se
 cnpg-staging-fbref          : cnpg-fbref-key : s3_cnpg_fbref_id : s3_cnpg_fbref_secret
 cnpg-staging-ai-gateway : cnpg-staging-ai-gateway-key : s3_cnpg_staging_ai_gateway_id : s3_cnpg_staging_ai_gateway_secret
 cnpg-staging-n8n : cnpg-staging-n8n-key : s3_cnpg_staging_n8n_id : s3_cnpg_staging_n8n_secret
+cnpg-staging-nextcloud : cnpg-staging-nextcloud-key : s3_cnpg_staging_nextcloud_id : s3_cnpg_staging_nextcloud_secret
