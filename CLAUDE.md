@@ -93,6 +93,14 @@ already in production** — reconfigure it **additively** (do not import
   installed node's garage.service). ALL of these now need nix — sops/age come from the flake's
   **purego** builds (`nix run .#sops`/`.#age`), never a stock/mise binary (see the
   Rosetta note below).
+- ⚠️ **This repo is PUBLIC and its real values are scrubbed to placeholders**
+  (`tailnet = "<tailnet>"`, overlay IPs in `100.64.0.x`, `aaaa…`/`bbbb…` Garage ids,
+  a placeholder ssh pubkey). `fleet config tailnet <name>` — and anything calling it,
+  e.g. `fleet buckets add` — writes the REAL tailnet back into `flake.nix` so the fleet
+  can deploy. That working copy MUST stay dirty and must NEVER be committed; nix reads
+  modified tracked files from a dirty tree, so `fleet deploy` works without committing.
+  `.githooks/pre-commit` blocks it (installed by `scripts/setup`, or
+  `git config core.hooksPath .githooks`). Commit files BY NAME, never `git add -A`.
 - **deploy-rs, not Flux** (`fleet deploy <node>` wraps it): `nix run .#deploy-rs -- .#node-a`. Magic
   rollback auto-reverts a bad firewall/tailscaled change in ~30s, but only once a
   *prior* generation was also deploy-rs-deployed — do the first post-install

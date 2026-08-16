@@ -5,6 +5,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+# --- git hooks: block re-committing values scrubbed from this PUBLIC repo -----
+# .githooks/pre-commit refuses any staged content carrying the real tailnet name,
+# a real overlay IP, a real ssh pubkey, or a 64-hex Garage id / rpc_secret. Needed
+# because `fleet config tailnet` writes the real name back into flake.nix, which
+# must stay dirty and never be committed. Per-clone setting, so it is set here.
+git -C "$ROOT" config core.hooksPath .githooks
+
 # --- mise: trust + install the pinned tools ----------------------------------
 /usr/local/bin/mise trust "$ROOT/mise.toml" && /usr/local/bin/mise install
 # Put mise-managed tools (node, uv, ...) on PATH for the rest of this script;

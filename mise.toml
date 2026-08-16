@@ -47,4 +47,4 @@ run = "nix run .#deploy-rs -- .#node-b --remote-build"
 
 [tasks.lint]
 description = "shellcheck the repo scripts"
-run = "shellcheck scripts/fleet scripts/setup secrets/gen-secrets.sh"
+run = "shellcheck scripts/fleet scripts/setup secrets/gen-secrets.sh .githooks/pre-commit"
