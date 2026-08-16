@@ -14,7 +14,23 @@
 ![deploy-rs](https://img.shields.io/badge/deploy--rs-magic%20rollback-B7410E?style=flat-square&logo=rust&logoColor=white)
 ![License](https://img.shields.io/badge/license-Unlicense-lightgrey?style=flat-square)
 
+**Hiring managers and recruiters — start with [PORTFOLIO.md](PORTFOLIO.md)**, a plain-language guide to
+what this project is and what it demonstrates.
+
 </div>
+
+---
+
+## At a glance
+
+| | |
+|---|---|
+| **What** | A self-hosted, S3-compatible object store (Garage) running on four NixOS machines across three physical sites |
+| **Why** | The disaster-recovery target for a production Kubernetes cluster — deliberately built in a trust domain that cluster cannot reach |
+| **How** | Fully declarative: `disko` + `nixos-anywhere` + `deploy-rs` + `sops-nix`, with one CLI driving the entire node lifecycle |
+| **The defence** | ZFS read-only snapshots, pruned by a separate OS identity — immutability that no stolen S3 key can reach |
+| **Scale** | ~2 600 lines of Nix · a 1 761-line lifecycle CLI · 7 design and runbook documents (~33 000 words) · 48 commits over 7 weeks |
+| **Status** | Live on nodes A + C at replication factor 2 — see [Current state, honestly](#current-state-honestly) |
 
 ---
 
@@ -256,6 +272,26 @@ The design target and what is actually running are not the same thing, and the r
 
 ---
 
+## Documentation
+
+Seven documents, ~33 000 words. Two are architecture (*why* and *how*); the rest are the runbooks
+actually used to build the machines — written before and during the build, not reconstructed after.
+
+| Document | What it covers |
+|---|---|
+| [00 — Garage backup cluster](documentations/00-garage-backup-cluster.md) | **Start here.** Goals and non-goals, the threat model, the topology, all six ADRs with rejected alternatives, the Garage data plane, the five-layer ransomware defence, and the secrets model |
+| [01 — Implementation plan](documentations/01-garage-backup-implementation-plan.md) | The phased build runbook: secrets custody → provision A → provision B/C and form the cluster → node-D gateway → backup jobs → moat → monitoring → restore drills → cutover. Includes the risk register and secrets inventory |
+| [02 — node-B image flash](documentations/02-node-b-image-flash.md) | Building a NixOS disk image on the workstation and `dd`-ing it to NVMe. **Superseded by 03** — kept because the rejected approach and the reason it was dropped are part of the record |
+| [03 — node-B USB install](documentations/03-node-b-usb-install.md) | The chosen method: boot the installer USB, partition with `disko`, install the flake |
+| [04 — node-A + node-B install](documentations/04-node-a-b-install.md) | The dual-disk runbook — node-A's LUKS/TPM root and node-B's prompt-unlock. Carries a dated CORRECTIONS block that supersedes the body where they conflict |
+| [05 — node-A secure pipeline](documentations/05-node-a-secure-pipeline.md) | Bare metal → hardened, unattended-booting node: LUKS, TPM2 enrollment, Secure Boot with lanzaboote. Order is load-bearing and the document says why |
+| [06 — Garage buckets guide](documentations/06-garage-buckets-guide.md) | Declarative S3 buckets and keys: adding a bucket with its own dedicated key, and accessing it from a client |
+
+> Documents 00 and 01 were authored in the production cluster's repository and bundled here. Their bare
+> `documentations/0X-*.md` references and Flux/Kubernetes paths point at *that* repo, not this one.
+
+---
+
 ## Reading this repo in five minutes
 
 | Start here | Why |
@@ -291,7 +327,7 @@ garage-fleet/
 ├── hosts/                 # node-a…d + one disko file per machine
 ├── secrets/               # SOPS-encrypted, committed (a flake only sees Git-tracked files)
 ├── scripts/fleet          # the lifecycle CLI
-└── documentations/        # 8 documents: design + ADRs, phased runbook, per-node install guides
+└── documentations/        # 7 documents: design + ADRs, phased runbook, per-node install guides
 ```
 
 ### By the numbers
@@ -299,10 +335,11 @@ garage-fleet/
 | | |
 |---|---|
 | Machines / sites / zones | 4 · 3 · 3 |
-| Nix | ~2 700 lines across 23 files — modules, host definitions, and disk layouts |
+| Nix | ~2 600 lines across 22 files — modules, host definitions, and disk layouts |
 | Lifecycle CLI | 1 761 lines of Bash, 12 subcommands, TUI |
-| Documentation | 8 documents, ~34 000 words — design records, runbooks, and per-node install guides |
+| Documentation | 7 documents, ~33 000 words — design records, runbooks, and per-node install guides |
 | Architecture decision records | 6, each with rejected alternatives |
+| History | 48 commits over 7 weeks |
 
 ---
 
