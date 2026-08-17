@@ -40,7 +40,7 @@
   # even where it is unused) — only `config` is gated.
   config = lib.mkIf (config.fleet.role == "storage") {
     # Native ZFS is enabled; the encrypted pool + datasets are declared in
-    # disko-storage.nix. Here we add the snapshot policy + pool hygiene.
+    # hosts/disko-node-*.nix. Here we add the snapshot policy + pool hygiene.
     boot.supportedFilesystems = [ "zfs" ];
 
     # --- sanoid: read-only snapshots, root/sanoid-pruned (NOT S3-pruned) ------

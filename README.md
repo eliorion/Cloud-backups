@@ -190,7 +190,7 @@ sops-install-secrets: 0 successful groups required, got 0
 …and every secret-fed service (`garage`, `tailscaled`) starved. X25519 and AES-GCM survive Rosetta;
 only that one assembly path is wrong. The fix is in [`flake.nix`](flake.nix): rebuild `sops` and `age`
 with `-tags=purego` to drop the assembly for the generic Go path, and route *every* encrypt-side call —
-`scripts/fleet`, `mise.toml`, `secrets/gen-secrets.sh` — through those builds. Verified against
+`scripts/fleet` and `mise.toml` — through those builds. Verified against
 RFC 8439 vectors.
 
 ### 2. The per-node identity could not decrypt at boot

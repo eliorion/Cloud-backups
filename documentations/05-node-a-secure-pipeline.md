@@ -21,7 +21,7 @@ prompt-unlock flow in [doc 04](04-node-a-b-install.md).
 >   mis-translates Go's asm ChaCha20-Poly1305, so a stock sops silently emits
 >   corrupt ciphertext the node can't decrypt (`sops-install-secrets`: `0 successful
 >   groups`). The nodes' own AMD CPUs are fine; only the emulated workstation is
->   affected. `scripts/fleet`/`mise.toml`/`gen-secrets.sh` already route through the
+>   affected. `scripts/fleet` and `mise.toml` already route through the
 >   safe builds.
 > - **Node identity is a DEDICATED age key** (`private-keys/node-a-age.txt` →
 >   `/var/lib/sops-nix/key.txt`), NOT ssh-to-age of the SSH host key. `fleet new`

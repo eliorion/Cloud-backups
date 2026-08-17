@@ -19,7 +19,7 @@ let
   isGateway = cfg.role == "gateway";
 
   # Gateway holds no partitions; storage nodes put meta+data on dedicated ZFS
-  # datasets (disko-storage.nix). Gateway uses small local dirs (doc 01 Phase 3).
+  # datasets (hosts/disko-node-*.nix). Gateway uses small local dirs (doc 01 Phase 3).
   metaDir = "/srv/garage/meta";
   dataDir = "/srv/garage/data";
 
@@ -143,7 +143,7 @@ in
     };
 
     # Ensure the meta/data parent dir exists for the gateway (storage nodes get
-    # the ZFS dataset mountpoints from disko-storage.nix).
+    # the ZFS dataset mountpoints from hosts/disko-node-*.nix).
     systemd.tmpfiles.rules = lib.mkIf isGateway [
       "d ${metaDir} 0700 garage garage -"
       "d ${dataDir} 0700 garage garage -"

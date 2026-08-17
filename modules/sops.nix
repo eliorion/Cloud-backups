@@ -65,7 +65,7 @@ in
 
     # --- shared cluster secrets (secrets/common.enc.yaml) --------------------
     # The .example ships placeholders; the operator encrypts the real file with
-    # gen-secrets.sh. Garage reads these via *_file keys (modules/garage.nix).
+    # `fleet new`. Garage reads these via *_file keys (modules/garage.nix).
     secrets."rpc_secret" = {
       sopsFile = commonSecrets;
       owner = "garage";
@@ -111,7 +111,7 @@ in
       group = "root";
       mode = "0400";
       # TODO operator: wire the boot-time `zfs load-key` to read THIS path
-      #   (config.sops.secrets."zfs-passphrase".path) — see disko-storage.nix.
+      #   (config.sops.secrets."zfs-passphrase".path) — see hosts/disko-node-*.nix.
       #   sops-nix decrypts into /run/secrets after stage-2; for early-boot ZFS
       #   import either use a key-load systemd unit ordered after sops-nix, or
       #   neededForUsers/initrd secret materialisation. Do NOT leave the live key

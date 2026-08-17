@@ -11,7 +11,7 @@ private-keys/
 local-zfs.key
 *.key
 
-# Never commit PLAINTEXT secret values (e.g. gen-secrets output notes). The real
+# Never commit PLAINTEXT secret values (e.g. `fleet new` output notes). The real
 # values live ENCRYPTED in secrets/*.enc.yaml; keep break-glass copies OFFLINE.
 *.real-value
 

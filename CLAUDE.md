@@ -56,15 +56,15 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
   prompt-unlock over the mesh. Root is a `wpool` dataset, not a fixed partition),
   `disko-node-b.nix` (B: **unencrypted** ext4 root + encrypted npool + dpool),
   `disko-node-c.nix` (C: its OWN file, SAME dual-disk shape as B — NVMe npool
-  ssd+meta / HDD dpool bulk; same AMD Lenovo box), `disko-storage.nix` (legacy
-  single-disk storage skeleton — no longer imported by A/B/C), `disko-gateway.nix`
+  ssd+meta / HDD dpool bulk; same AMD Lenovo box), `disko-gateway.nix`
   (boot+root only, greenfield D rebuild). Both pools set `rootFsOptions.mountpoint =
   "none"` (no empty `/npool`|`/dpool` root mounts). ZFS-native encrypted datasets use
   `keylocation=prompt` at runtime, `file://${fleet.zfsInstallKeyfile}` only under the
   `-install` variant; node-A's LUKS root additionally reads `fleet.luksInstallKeyfile`
   at install (its own passphrase, node-A only).
-- `secrets/` — `gen-secrets.sh`, `common.enc.yaml.example`,
-  `node.enc.yaml.example`; `s3-keys.enc.yaml` = the Garage S3 access keys
+- `secrets/` — `common.enc.yaml.example`,
+  `node.enc.yaml.example` (templates; `fleet new` mints the real files);
+  `s3-keys.enc.yaml` = the Garage S3 access keys
   (etcd + CNPG buckets), encrypted to the **workstation key ONLY** (never a node),
   managed by `fleet buckets` (doc 06).
 - `buckets.spec` — the declarative bucket/key spec (`bucket : key-name : id-field :
@@ -147,8 +147,8 @@ already in production** — reconfigure it **additively** (do not import
   ChaCha20-Poly1305, so a stock sops/age SILENTLY produces corrupt age ciphertext:
   it decrypts on the workstation but no real node can (`sops-install-secrets` fails
   `0 successful groups required, got 0`, starving garage/tailscale). `flake.nix`
-  `withPurego` builds the Rosetta-safe variants; `scripts/fleet`, `mise.toml`, and
-  `secrets/gen-secrets.sh` all route through them. X25519 and AES-GCM survive
+  `withPurego` builds the Rosetta-safe variants; `scripts/fleet` and `mise.toml`
+  both route through them. X25519 and AES-GCM survive
   Rosetta — only ChaCha20-Poly1305 asm is wrong; the nodes' own AMD CPUs are fine.
 - **Per-node identity = a DEDICATED age key**, `private-keys/<node>-age.txt`
   (gitignored, break-glass), whose recipient is in `.sops.yaml` and whose private

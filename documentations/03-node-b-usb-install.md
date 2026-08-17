@@ -58,7 +58,8 @@ All paths below are relative to `garage-fleet/`.
 
 ```bash
 cd garage-fleet
-./secrets/gen-secrets.sh        # prints fleet age RECIPIENT + rpc/admin/metrics
+./scripts/fleet new node-b      # prints fleet age RECIPIENT + rpc/admin/metrics
+                                # (replaced secrets/gen-secrets.sh, since deleted)
 export SOPS_AGE_KEY_FILE="$HOME/.config/sops/age/garage-fleet.txt"
 ```
 

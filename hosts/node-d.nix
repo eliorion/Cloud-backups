@@ -1,7 +1,7 @@
 # hosts/node-d.nix — GATEWAY node (capacity 0, no data). doc 00 §3, doc 01 P3.
 #
 # Gateway role: garage(gateway, capacity 0, NO zone) + tailscale. It does NOT
-# import disko-storage and does NOT import zfs-sanoid — a gateway has no data
+# import any disko layout and does NOT import zfs-sanoid — a gateway has no data
 # pool and no snapshot moat (nothing to snapshot).
 #
 # ⚠️ node-D is ALREADY IN PRODUCTION (doc 01 Phase 3). The intended path is an

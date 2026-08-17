@@ -89,7 +89,8 @@ ssh-to-age < node-b-extra/etc/ssh/ssh_host_ed25519_key.pub
 ### 1.2 Fleet age key + shared secrets
 
 ```bash
-./secrets/gen-secrets.sh        # mints fleet age key, prints recipient + rpc/admin/metrics
+./scripts/fleet new node-b      # mints fleet age key, node key, recipient + rpc/admin/metrics
+                                # (replaced secrets/gen-secrets.sh, since deleted)
 export SOPS_AGE_KEY_FILE="$HOME/.config/sops/age/garage-fleet.txt"
 ```
 
@@ -99,7 +100,7 @@ Step 1.1, in both `creation_rules`:
 
 ```yaml
 keys:
-  - &fleet_workstation age1<paste fleet recipient from gen-secrets.sh>
+  - &fleet_workstation age1<paste fleet recipient from `fleet new`>
   - &node_b           age1<paste node-B recipient from ssh-to-age>
 
 creation_rules:
