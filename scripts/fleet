@@ -87,9 +87,9 @@ STATE_DIR="$ROOT/.fleet"
 # Must match flake.nix `installKeyfile` (the tmpfs path nixos-anywhere uploads
 # the ZFS passphrase to, that the *-install disko variants read).
 INSTALL_KEYFILE_REMOTE="/tmp/fleet-zfs.key"
-# Must match hosts/disko-node-a.nix `luksInstallKeyfile` — the tmpfs path the
-# cryptwork LUKS passphrase is uploaded to (LUKS-root nodes only; node-A).
-INSTALL_LUKS_KEYFILE_REMOTE="/tmp/fleet-luks.key"
+# (The LUKS twin of the above is NOT a constant: node_luks_keyfile() evals
+# fleet.luksInstallKeyfile off the -install variant, so there is nothing to keep
+# in sync by hand.)
 
 # Fleet age private key (decrypts sops as the workstation). In-repo copy first
 # (private-keys/, gitignored), then the XDG location, then env override.
@@ -120,6 +120,14 @@ mk() {
     no) printf '%s✗%s' "$RED" "$R" ;;
     *)  printf '%s·%s' "$D"   "$R" ;; # na / not-yet
   esac
+}
+# Glyph for a predicate: `mk_if <yes> <no> <cmd…>`. The status table has ~10 of
+# these cells; spelling each as `cond && mk ok || mk no` is the A&&B||C pattern
+# (SC2015), which reads as if-then-else but is not. Predicates passed here must be
+# silent — every one of them is (grep -q / ls-files >/dev/null / awk exit).
+mk_if() {
+  local yes="$1" no="$2"; shift 2
+  if "$@"; then mk "$yes"; else mk "$no"; fi
 }
 # Live, best-effort: is garage.service active on the node? Probes over ssh
 # (root@<node>, relying on the ~/.ssh/config alias / MagicDNS the operator uses).
@@ -500,7 +508,8 @@ cmd_new() {
   sops --config "$SOPS_YAML" updatekeys -y "$COMMON" >/dev/null && ok "updatekeys common.enc.yaml"
   local tsfile="$SECRETS/$node.enc.yaml"
   [[ -f "$tsfile" ]] && { sops --config "$SOPS_YAML" updatekeys -y "$tsfile" >/dev/null && ok "updatekeys $node tailscale"; }
-  sops -d "$COMMON" >/dev/null 2>&1 && ok "workstation decrypt check OK" || warn "decrypt check failed (is the fleet age key present?)"
+  if sops -d "$COMMON" >/dev/null 2>&1; then ok "workstation decrypt check OK"
+  else warn "decrypt check failed (is the fleet age key present?)"; fi
   hdr "next"
   note "Review the scaffolded hosts/$node.nix + disko (device paths, capacity, hostId)."
   note "Commit the ENCRYPTED secrets:   fleet secrets   (verify + git add), then git commit."
@@ -660,7 +669,11 @@ cmd_install() {
 # installer's ephemeral one, so ssh would otherwise abort with
 # "REMOTE HOST IDENTIFICATION HAS CHANGED".
 wait_for_ssh() {
-  local target="$1" tries="${2:-60}" host="${target#*@}" i=0
+  local target="$1" tries="${2:-60}" i=0
+  # `host` MUST be its own `local`: in `local a="$1" b="${a#…}"` the shell expands
+  # every RHS BEFORE the builtin runs, so `b` reads the OUTER `a` (or empty) — which
+  # silently made ssh-keygen -R below a no-op, defeating the known_hosts re-key.
+  local host="${target#*@}"
   note "waiting for $host to finish rebooting and start sshd…"
   ssh-keygen -R "$host" >/dev/null 2>&1 || true
   while (( i < tries )); do
@@ -682,6 +695,8 @@ wait_for_ssh() {
 # provisioned seconds ago (brand-new host key, on the LAN).
 finalize_storage() {
   local target="$1" remote
+  # shellcheck disable=SC2016  # single-quoted ON PURPOSE: $ds/$(zfs …) must expand
+  # on the NODE, not here. Double-quoting would run zfs on the workstation.
   remote='set -e
 for ds in $(zfs get -H -o name,value -t filesystem keylocation | awk '\''$2 ~ /^file:/{print $1}'\''); do
   echo ">> $ds: load-key (type the SAME passphrase) then set keylocation=prompt"
@@ -756,6 +771,7 @@ cmd_unlock() {
   # Runs as root (default root@ target), so no sudo. Single-quoted so $vars expand
   # ON THE NODE. Reads the passphrase from stdin line 1, loads every LOCKED
   # encryptionroot, mounts, starts garage, prints the result.
+  # shellcheck disable=SC2016  # see the note above: $vars expand ON THE NODE.
   local remote='set -eu
 IFS= read -r PASS
 n=0
@@ -1132,6 +1148,8 @@ buckets_apply() {
 
   # Remote reconciler: reads a manifest on stdin (a BUCKETS line + one KEY line per
   # key), runs create/import/allow. garage reads /dev/null so it never eats the loop.
+  # shellcheck disable=SC2016  # single-quoted ON PURPOSE: "$@" is the REMOTE
+  # function's arguments, and $kind/$body come from the manifest read on the node.
   local remote='set -eu
 G() { garage -c /etc/garage.toml "$@" </dev/null; }
 while read -r kind body; do
@@ -1171,6 +1189,8 @@ buckets_status() {
   local host; host="$(reachable_storage_node)" \
     || die "no storage node reachable with garage up."
   hdr "buckets status @ $host"
+  # shellcheck disable=SC2016  # single-quoted ON PURPOSE: $b expands on the node.
+  # The one deliberate LOCAL expansion breaks out of the quotes: '"${BUCKETS[*]}"'.
   local remote='set -eu
 garage -c /etc/garage.toml bucket list
 echo; garage -c /etc/garage.toml key list; echo
@@ -1323,9 +1343,14 @@ cmd_secrets() {
     printf '\n  e <n>  edit (sops)   v  verify + git add   r  re-encrypt all   q  back\n'
     local choice; choice="$(ask 'choice')"
     case "$choice" in
-      e*) local n="${choice#e }"; n="${n// /}"; [[ "$n" =~ ^[0-9]+$ ]] && sops "${files[$((n-1))]}" || warn "give an index, e.g. 'e 1'";;
+      e*) local n="${choice#e }"; n="${n// /}"
+          # Bounds-checked: an out-of-range index used to expand to an empty path
+          # and hand `sops` nothing, while still printing the "give an index" hint.
+          if [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 1 && n <= ${#files[@]} )); then sops "${files[$((n-1))]}"
+          else warn "give an index, e.g. 'e 1'"; fi;;
       v)  local bad; bad="$(grep -L '^sops:' "$SECRETS"/*.enc.yaml 2>/dev/null || true)"
-          if [[ -n "$bad" ]]; then err "PLAINTEXT files — NOT staging:"; printf '   %s\n' $bad
+          if [[ -n "$bad" ]]; then err "PLAINTEXT files — NOT staging:"
+               while IFS= read -r p; do printf '   %s\n' "$p"; done <<<"$bad"
           else git -C "$ROOT" add .sops.yaml "$SECRETS"/*.enc.yaml buckets.spec flake.nix hosts/ 2>/dev/null
                ok "staged .sops.yaml + encrypted secrets + buckets.spec + flake/hosts"; git -C "$ROOT" status --short | sed 's/^/   /'
                note "now: git commit -m 'fleet: add/update node secrets'"; fi;;
@@ -1378,14 +1403,14 @@ cmd_status() {
 
   # --- workstation-side readiness (label-aligned; glyph then free text) -------
   printf '  %-16s %s  %s\n' 'fleet age key' \
-    "$([[ -f "$FLEET_AGE_KEY_FILE" ]] && mk ok || mk no)" \
+    "$(mk_if ok no test -f "$FLEET_AGE_KEY_FILE")" \
     "$([[ -f "$FLEET_AGE_KEY_FILE" ]] && printf '%s' "$FLEET_AGE_KEY_FILE" || printf 'missing')"
-  printf '  %-16s %s\n'     '.sops recipients' "$(recipient_set && mk ok || mk no)"
+  printf '  %-16s %s\n'     '.sops recipients' "$(mk_if ok no recipient_set)"
   printf '  %-16s %s  %s\n' 'common secret' \
-    "$(encrypted "$COMMON" && mk ok || mk no)" \
+    "$(mk_if ok no encrypted "$COMMON")" \
     "$(encrypted "$COMMON" && printf 'encrypted' || printf 'NOT encrypted')"
   printf '  %-16s %s  %s\n' 'tailnet' \
-    "$(tailnet_set && mk ok || mk no)" \
+    "$(mk_if ok no tailnet_set)" \
     "$(tailnet_set && grep -oP 'tailnet = "\K[^"]+' "$FLAKE" | head -1 || printf '<unset>')"
 
   vault_check "${nodes[@]}" || true
@@ -1416,12 +1441,12 @@ cmd_status() {
   for node in "${nodes[@]}"; do
     type="$(type_of "$node" 2>/dev/null || echo '?')"; ts="$SECRETS/$node.enc.yaml"
     printf '  %-8s %-21s' "$node" "$(type_short "$type")"
-    printf '  %s      ' "$([[ -f "$(node_age_key_path "$node")" ]] && mk ok || mk no)"
-    printf '  %s      ' "$(node_recipient_ready "$node" && mk ok || mk no)"
-    printf '  %s      ' "$(encrypted "$ts" && mk ok || mk no)"
-    printf '  %s      ' "$(committed "hosts/$node.nix" && mk ok || mk no)"
-    printf '  %s      ' "$([[ -f "$STATE_DIR/installed-$node" ]] && mk ok || mk na)"
-    printf '  %s      ' "$([[ -f "$STATE_DIR/deployed-$node" ]] && mk ok || mk na)"
+    printf '  %s      ' "$(mk_if ok no test -f "$(node_age_key_path "$node")")"
+    printf '  %s      ' "$(mk_if ok no node_recipient_ready "$node")"
+    printf '  %s      ' "$(mk_if ok no encrypted "$ts")"
+    printf '  %s      ' "$(mk_if ok no committed "hosts/$node.nix")"
+    printf '  %s      ' "$(mk_if ok na test -f "$STATE_DIR/installed-$node")"
+    printf '  %s      ' "$(mk_if ok na test -f "$STATE_DIR/deployed-$node")"
     printf '  %s      ' "$(mk "$(cat "$gdir/$node" 2>/dev/null || echo na)")"
     printf '\n'
   done
