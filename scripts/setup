@@ -35,6 +35,7 @@ graphify install
 # --- Nix: prime the flake lock (aarch64-native; x86_64 closures build on the
 #     box via `mise run deploy` --remote-build) ---------------------------------
 if [ -f /home/vscode/.nix-profile/etc/profile.d/nix.sh ]; then
+  # shellcheck source=/dev/null  # profile script, only present inside the container
   . /home/vscode/.nix-profile/etc/profile.d/nix.sh
   ( cd "$ROOT" && [ -f flake.lock ] || nix flake lock )
 fi
