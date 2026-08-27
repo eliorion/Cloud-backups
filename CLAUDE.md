@@ -20,6 +20,10 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
 - `documentations/06-garage-buckets-guide.md` — declarative S3 buckets + keys
   (`fleet buckets`, spec in `buckets.spec`): add a bucket with its OWN key in one
   command (`fleet buckets add <bucket>`), access it with that key.
+- `documentations/07-garage-rf3-migration.md` — rf=2 → rf=3 migration (one node down
+  keeps BOTH reads and writes). No in-place path exists: full stop + `cluster_layout`
+  purge on every node + re-replication. Restore path is a VERIFIED rclone export
+  (`rclone check --checksum`), NOT named ZFS snapshots — gated pre-flight, §6 restore.
 
 > Docs 00/01 were authored in the prod repo and bundled here; their bare
 > `documentations/0X-*.md` references and Flux/k8s paths point at the prod repo,

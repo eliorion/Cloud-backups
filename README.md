@@ -29,7 +29,7 @@ what this project is and what it demonstrates.
 | **Why** | The disaster-recovery target for a production Kubernetes cluster — deliberately built in a trust domain that cluster cannot reach |
 | **How** | Fully declarative: `disko` + `nixos-anywhere` + `deploy-rs` + `sops-nix`, with one CLI driving the entire node lifecycle |
 | **The defence** | ZFS read-only snapshots, pruned by a separate OS identity — immutability that no stolen S3 key can reach |
-| **Scale** | ~2 600 lines of Nix · a 1 761-line lifecycle CLI · 7 design and runbook documents (~33 000 words) · 48 commits over 7 weeks |
+| **Scale** | ~2 600 lines of Nix · a 1 761-line lifecycle CLI · 8 design and runbook documents (~36 000 words) · 48 commits over 7 weeks |
 | **Status** | Live on nodes A + C at replication factor 2 — see [Current state, honestly](#current-state-honestly) |
 
 ---
@@ -274,7 +274,7 @@ The design target and what is actually running are not the same thing, and the r
 
 ## Documentation
 
-Seven documents, ~33 000 words. Two are architecture (*why* and *how*); the rest are the runbooks
+Eight documents, ~36 000 words. Two are architecture (*why* and *how*); the rest are the runbooks
 actually used to build the machines — written before and during the build, not reconstructed after.
 
 | Document | What it covers |
@@ -286,6 +286,7 @@ actually used to build the machines — written before and during the build, not
 | [04 — node-A + node-B install](documentations/04-node-a-b-install.md) | The dual-disk runbook — node-A's LUKS/TPM root and node-B's prompt-unlock. Carries a dated CORRECTIONS block that supersedes the body where they conflict |
 | [05 — node-A secure pipeline](documentations/05-node-a-secure-pipeline.md) | Bare metal → hardened, unattended-booting node: LUKS, TPM2 enrollment, Secure Boot with lanzaboote. Order is load-bearing and the document says why |
 | [06 — Garage buckets guide](documentations/06-garage-buckets-guide.md) | Declarative S3 buckets and keys: adding a bucket with its own dedicated key, and accessing it from a client |
+| [07 — rf=2 → rf=3 migration](documentations/07-garage-rf3-migration.md) | Raising the replication factor so one node down still serves reads **and** writes: why Garage has no in-place path, the gated pre-flight, and the verified-export restore procedure |
 
 > Documents 00 and 01 were authored in the production cluster's repository and bundled here. Their bare
 > `documentations/0X-*.md` references and Flux/Kubernetes paths point at *that* repo, not this one.
@@ -327,7 +328,7 @@ garage-fleet/
 ├── hosts/                 # node-a…d + one disko file per machine
 ├── secrets/               # SOPS-encrypted, committed (a flake only sees Git-tracked files)
 ├── scripts/fleet          # the lifecycle CLI
-└── documentations/        # 7 documents: design + ADRs, phased runbook, per-node install guides
+└── documentations/        # 8 documents: design + ADRs, phased runbook, per-node install guides
 ```
 
 ### By the numbers
@@ -337,7 +338,7 @@ garage-fleet/
 | Machines / sites / zones | 4 · 3 · 3 |
 | Nix | ~2 600 lines across 22 files — modules, host definitions, and disk layouts |
 | Lifecycle CLI | 1 761 lines of Bash, 12 subcommands, TUI |
-| Documentation | 7 documents, ~33 000 words — design records, runbooks, and per-node install guides |
+| Documentation | 8 documents, ~36 000 words — design records, runbooks, and per-node install guides |
 | Architecture decision records | 6, each with rejected alternatives |
 | History | 48 commits over 7 weeks |
 
