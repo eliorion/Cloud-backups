@@ -138,7 +138,7 @@ Unreferenced (RC=0) entries are GC-pending and acceptable.
 ### Gate 2 — Prove the source is intact before copying it
 
 ```bash
-ssh root@node-a.<tailnet>.ts.net 'garage -c /etc/garage.toml repair --yes --all-nodes scrub'
+ssh root@node-a.<tailnet>.ts.net 'garage -c /etc/garage.toml repair --yes --all-nodes scrub start'
 # poll until scrub-last-completed advances on every node:
 for n in node-a node-b node-c; do
   ssh root@$n.<tailnet>.ts.net 'garage -c /etc/garage.toml worker get | grep -i scrub'
@@ -280,9 +280,11 @@ distinct zones"** before applying.
 Going 2 → 3 copies means a third copy of every partition must be built.
 
 ```bash
-ssh root@node-a.<tailnet>.ts.net 'garage -c /etc/garage.toml repair --help'
-# run the applicable repair operations (blocks, tables); confirm exact
-# subcommands against --help on 2.1.0 rather than assuming them.
+ssh root@node-a.<tailnet>.ts.net '
+  garage -c /etc/garage.toml repair --yes --all-nodes blocks
+  garage -c /etc/garage.toml repair --yes --all-nodes tables'
+# Verified against 2.1.0 on 2026-08-28. NOTE the subcommand form:
+#   `repair scrub` alone only prints usage — it needs `repair scrub start`.
 ```
 
 Expect hours-to-days over the WAN for ~146 GiB. The cluster **is** available during
