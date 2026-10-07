@@ -1,6 +1,7 @@
 # modules/workstation.nix — node-A's SECOND role: a remote devcontainer
 # workstation co-located with the onsite DR Garage node. Driven from a Mac with
-# DevPod's SSH provider: DevPod SSHes in as the `sysadmin` user and talks to the
+# DevPod's SSH provider: DevPod SSHes in as the dedicated `devpod` user (uid 1000 —
+# see the user block below for why that number is load-bearing) and talks to the
 # ROOT docker daemon's /var/run/docker.sock (via the docker group) — so the Mac
 # stays thin and the containers run on node-A's NVMe. Imported by hosts/node-a.nix
 # ONLY. (Historical note: this was rootless podman + a DOCKER_HOST override; it is
@@ -15,7 +16,7 @@
 #     - malicious third-party code run inside a devcontainer (a hostile npm/pip
 #       transitive dep is the realistic vector — it arrives via package.json, not
 #       via the network),
-#     - anything that compromises the `sysadmin` session.
+#     - anything that compromises the `devpod` (or `sysadmin`) session.
 #   This was chosen DELIBERATELY (operator decision): node-A trades its moat for
 #   --privileged / docker-in-docker / low ports. Tailscale-only exposure does NOT
 #   mitigate it — the perimeter is not the threat model here.
@@ -65,22 +66,50 @@
   # [ wheel docker ] on node-A while staying [ wheel ] on B/C/D (which have no
   # docker group; see the base.nix note). ROOT-EQUIVALENT: the docker group grants
   # full control of the root daemon — the deliberate moat trade documented at the
-  # top of this file. DevPod connects to node-A as `sysadmin` and reaches
-  # /var/run/docker.sock via this group.
+  # top of this file.
   users.users.sysadmin.extraGroups = [ "docker" ];
+
+  # --- `devpod`: the devcontainer login, uid PINNED to 1000 ------------------
+  # DevPod's SSH provider connects as THIS user and reaches /var/run/docker.sock
+  # via the docker group. uid 1000 is load-bearing, not cosmetic: at the end of
+  # every `devpod up` the agent chowns the workspace bind-mount to the CONTAINER
+  # user (`vscode` = uid 1000 in the devcontainers base images). The agent itself
+  # runs as this host user, so if the two uids differ it can no longer rewrite
+  # ~/.devpod/.../content on the NEXT `up` — every rebuild then dies with
+  # "permission denied" on .devcontainer/Dockerfile or .devpod-internal/. That is
+  # exactly what `sysadmin` (uid 2000, PINNED for wpool/home ownership) hit, and
+  # why devpod got its own login instead. DevPod has no option to skip the chown.
+  #
+  # NOT in wheel — unlike `sysadmin` this user needs no sudo on node-A (the agent
+  # logs "No root required"). It IS in docker, which is root-equivalent (the moat
+  # trade at the top of this file), but keeping it out of wheel means hostile code
+  # in a devcontainer no longer lands directly in the fleet OPERATOR account.
+  users.users.devpod = {
+    isNormalUser = true;
+    uid = 1000;
+    extraGroups = [ "docker" ];
+    # Same operator Mac key as sysadmin/root (see modules/base.nix).
+    openssh.authorizedKeys.keys = [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAATODO_operator_paste_your_ed25519_pubkey operator@workstation"
+    ];
+  };
 
   # The wpool/home ZFS dataset mounts /home/sysadmin as root:root (disko creates it
   # owned by root); hand it to the sysadmin user.
+  # /home/devpod is NOT on that dataset — wpool/home mounts at /home/sysadmin
+  # specifically, so devpod's workspaces (repo copies; image layers live on
+  # wpool/docker) sit on wpool/root. Give it its own dataset if it ever grows.
   systemd.tmpfiles.rules = [
     "d /home/sysadmin 0700 sysadmin users - -"
+    "d /home/devpod 0700 devpod users - -"
   ];
 
-  # --- DevPod entry: harden the `sysadmin` SSH login ------------------------
+  # --- DevPod entry: harden the `devpod` + `sysadmin` SSH logins ------------
   # Rides on the sshd from modules/base.nix. No DOCKER_HOST is set: the docker CLI
-  # defaults to /var/run/docker.sock, which `sysadmin` reaches via the docker group.
+  # defaults to /var/run/docker.sock, which both users reach via the docker group.
   services.openssh.extraConfig = ''
-    Match User sysadmin
-      # CONTAINMENT: code running as `sysadmin` is assumed hostile — and with the
+    Match User sysadmin,devpod
+      # CONTAINMENT: code running as `devpod`/`sysadmin` is assumed hostile — and with the
       # docker group that means assumed root-on-node-A. Killing agent forwarding is
       # what stops it becoming root on node-B/node-C too: a key forwarded from the
       # operator's Mac (which holds the fleet root/deploy keys) must NEVER be
