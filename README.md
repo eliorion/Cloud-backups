@@ -30,7 +30,7 @@ what this project is and what it demonstrates.
 | **How** | Fully declarative: `disko` + `nixos-anywhere` + `deploy-rs` + `sops-nix`, with one CLI driving the entire node lifecycle |
 | **The defence** | ZFS read-only snapshots, pruned by a separate OS identity — immutability that no stolen S3 key can reach |
 | **Scale** | ~2 600 lines of Nix · a 1 761-line lifecycle CLI · 8 design and runbook documents (~36 000 words) · 48 commits over 7 weeks |
-| **Status** | Live on nodes A + C at replication factor 2 — see [Current state, honestly](#current-state-honestly) |
+| **Status** | Live on nodes A + B + C at replication factor 2 — see [Current state, honestly](#current-state-honestly) |
 
 ---
 
@@ -263,8 +263,9 @@ The design target and what is actually running are not the same thing, and the r
 
 | | Design target | Running today |
 |---|---|---|
-| Storage nodes in layout | A + B + C | **A + C** — node-B offline long-term, config retained |
-| Replication factor | 3 (one copy per zone) | **2** — rf cannot exceed the distinct zone count |
+| Storage nodes in layout | A + B + C | **A + B + C** (layout v2) — but still rf=2, see below |
+| Alerting | push on node trouble | **staged, off** — `modules/health-alert.nix` (`fleet.healthAlert.enable`), needs `ntfy_url` in `common.enc.yaml` first |
+| Replication factor | 3 (one copy per zone) | **2** — three zones now allow rf=3; the migration is pending ([doc 07](documentations/07-garage-rf3-migration.md), no in-place path) |
 | Garage version | v2.3.0 | **2.1.0** — `nixos-25.05` ships no `garage_2_3_0` attribute; needs an input bump or overlay |
 | Secure Boot | lanzaboote signed UKIs fleet-wide | **node-A only** (`fleet.secureBoot = true`). B/C/D stay on systemd-boot — each needs its own physical firmware-enrollment trip, which cannot be done over SSH |
 | node-D gateway | additive reconfigure of a live prod box | **not yet wired** — commented out of the flake until its hardware config exists, so `nix flake check` stays green |
