@@ -48,6 +48,9 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
   operator commands — dataset lock/mount state + cluster `garage status`; unlock runs
   the root steps via passwordless-wheel sudo, grants NO `zfs allow`), `zfs-sanoid.nix`
   (ZFS + sanoid RO snapshot moat + autoScrub),
+  `health-alert.nix` (STAGED, `fleet.healthAlert.enable` default false: 15-min read-only
+  `fleet-health` check — locked dataset, garage down/peer missing, degraded pool, SMART
+  failing, stale sanoid snapshot — pushed to the ntfy URL in `common.enc.yaml` `ntfy_url`),
   `tailscale.nix`, `secureboot.nix` (node-A ONLY: lanzaboote signed UKIs + systemd
   stage-1 initrd + TPM2 LUKS unlock + the on-box enrollment runbook; gated on
   `fleet.secureBoot`), `workstation.nix` (node-A ONLY: ROOT-docker devcontainer host
@@ -154,6 +157,9 @@ already in production** — reconfigure it **additively** (do not import
   `withPurego` builds the Rosetta-safe variants; `scripts/fleet` and `mise.toml`
   both route through them. X25519 and AES-GCM survive
   Rosetta — only ChaCha20-Poly1305 asm is wrong; the nodes' own AMD CPUs are fine.
+  The devcontainer can ALSO be run on node-A via DevPod (real AMD CPU, `/` on
+  `wpool/docker`): the purego builds are harmless there, but `private-keys/` then sits on
+  node-A, which the fleet-age-key rule below forbids — run `fleet` from a box that is not node-A.
 - **Per-node identity = a DEDICATED age key**, `private-keys/<node>-age.txt`
   (gitignored, break-glass), whose recipient is in `.sops.yaml` and whose private
   half `fleet install` seeds to `/var/lib/sops-nix/key.txt` (`modules/sops.nix`

@@ -113,6 +113,7 @@
         ./modules/garage.nix
         ./modules/zfs-sanoid.nix
         ./modules/garage-ops.nix
+        ./modules/health-alert.nix
       ];
 
       # THE source of truth for the fleet's nodes. `scripts/fleet` adds ONE line
