@@ -117,8 +117,22 @@ scripts/fleet deploy node-c
 scripts/fleet deploy node-b
 ```
 
-The deploy only changes `sanoid.conf`: garage is not restarted and nothing on
-`dpool` is written (the closure lands on node-A's `wpool/root`, 117G free).
+> ⚠️ **Before each deploy, the working copy must hold the node's REAL values.**
+> The committed `hosts/node-*.nix` carry scrubbed placeholders (`tailscaleIp =
+> "100.64.0.1x"`, `aaaa…`/`bbbb…` peer ids). Deploying them makes garage bind an
+> address the node does not have: `Cannot assign requested address`, then a panic
+> at `netapp.rs:208` and a restart loop. This is what broke the first node-A
+> deploy on 2026-10-15. Restore the real values in the working copy (never
+> commit them), then diff the built config against the live one:
+>
+> ```bash
+> p=$(nix build --no-link --print-out-paths .#nixosConfigurations.node-c.config.system.build.toplevel)
+> diff <(ssh root@node-c cat /etc/garage.toml) $p/etc/garage.toml && echo identical
+> ```
+
+Intended change is only `sanoid.conf`. On a node whose pool is already full,
+garage cannot restart either (`ExecStartPre` `chown … No space left on device`),
+so prune first if the deploy restarts it.
 
 ```bash
 # 4. Prune now instead of waiting for the hourly timer
