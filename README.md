@@ -288,6 +288,7 @@ actually used to build the machines — written before and during the build, not
 | [05 — node-A secure pipeline](documentations/05-node-a-secure-pipeline.md) | Bare metal → hardened, unattended-booting node: LUKS, TPM2 enrollment, Secure Boot with lanzaboote. Order is load-bearing and the document says why |
 | [06 — Garage buckets guide](documentations/06-garage-buckets-guide.md) | Declarative S3 buckets and keys: adding a bucket with its own dedicated key, and accessing it from a client |
 | [07 — rf=2 → rf=3 migration](documentations/07-garage-rf3-migration.md) | Raising the replication factor so one node down still serves reads **and** writes: why Garage has no in-place path, the gated pre-flight, and the verified-export restore procedure |
+| [08 — Snapshot retention fix](documentations/08-snapshot-retention-fix.md) | 2026-10-15 node-A dpool-full incident: why snapshots outgrew live data (fbref WAL churn × 90-day retention), the GitOps retention change (daily 30 / monthly 2), runbook and verification |
 
 > Documents 00 and 01 were authored in the production cluster's repository and bundled here. Their bare
 > `documentations/0X-*.md` references and Flux/Kubernetes paths point at *that* repo, not this one.

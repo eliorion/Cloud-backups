@@ -24,6 +24,9 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
   keeps BOTH reads and writes). No in-place path exists: full stop + `cluster_layout`
   purge on every node + re-replication. Restore path is a VERIFIED rclone export
   (`rclone check --checksum`), NOT named ZFS snapshots — gated pre-flight, §6 restore.
+- `documentations/08-snapshot-retention-fix.md` — 2026-10-15 node-A dpool full (garage
+  LMDB ENOSPC). Snapshot space ≈ churn × retention; sanoid now daily 30 / monthly 2.
+  Retention alone is not enough at the Oct fbref WAL rate (~80 GiB/day) — prod side.
 
 > Docs 00/01 were authored in the prod repo and bundled here; their bare
 > `documentations/0X-*.md` references and Flux/k8s paths point at the prod repo,

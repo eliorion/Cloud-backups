@@ -37,9 +37,9 @@ The restore point is an **`rclone` export to an external S3 endpoint**, streamed
 > third replica, consuming space on node-A. Deliberate operator trade: the
 > export replaces them.
 >
-> **sanoid still runs** (`modules/zfs-sanoid.nix`: hourly 48, **daily 90**,
-> monthly 3). The moat is intact — what is gone is a *pinned, named* point that
-> pruning cannot reap. A same-day daily snapshot stays available for 90 days as a
+> **sanoid still runs** (`modules/zfs-sanoid.nix`: hourly 48, **daily 30**,
+> monthly 2). The moat is intact — what is gone is a *pinned, named* point that
+> pruning cannot reap. A same-day daily snapshot stays available for 30 days as a
 > **last-resort** fallback (§6.2). The accepted cost: rollback is now
 > "re-upload 146 GiB" (hours), not "`zfs rollback`" (seconds).
 

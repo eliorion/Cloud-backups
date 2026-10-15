@@ -47,10 +47,14 @@
     services.sanoid = {
       enable = true;
       templates.garage = {
-        # hourly + daily ladder, 30–90d retention (doc 00 §7 / doc 01 Phase 5).
+        # hourly + daily ladder, 30d retention (doc 00 §7 / doc 01 Phase 5).
+        # Every block Garage deletes (CNPG/etcd retention) stays pinned until the
+        # last snapshot holding it is pruned, so snapshot space ≈ churn × retention.
+        # daily = 90 / monthly = 3 pinned ~2.3× the live data and filled node-A's
+        # dpool on 2026-10-15 (garage LMDB ENOSPC, sanoid stopped) — doc 08.
         hourly = 48; # ~2 days of hourly granularity
-        daily = 90; # 90 days of daily — the long-retention immutable tier
-        monthly = 3;
+        daily = 30; # 30 days of daily — the immutable tier
+        monthly = 2; # each monthly pins a full month of churn; keep 2
         autosnap = true; # take snapshots
         autoprune = true; # prune per policy (root/sanoid identity only)
       };
