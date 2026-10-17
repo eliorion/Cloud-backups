@@ -75,17 +75,21 @@ in
         db_engine = "lmdb"; # required default for replication_factor >= 2
 
         # IDENTICAL on every node or the cluster will not form (doc 00 §5). SINGLE
-        # cluster-wide number, NOT additive per node. INTERIM 2-node (A+C) value:
-        # node-B is offline long-term and removed from the layout, so the cluster is
-        # two zones (onsite A + offsite-2 C). rf=2 = one copy on each — geo-separated
-        # durability; W=2 so BOTH must be up to write, R=1 to read. rf cannot exceed
-        # the number of distinct zones under maximum zone redundancy: 2 zones now →
-        # max rf 2. Garage caches rf in cluster_layout and REFUSES a config/layout rf
-        # mismatch, so changing rf means purging cluster_layout + rebuilding the layout
-        # (safe here: pool empty, DR data re-pushable). When node-B rejoins (3 zones),
-        # purge+rebuild again at rf=3 on ALL nodes, then `garage repair`.
+        # cluster-wide number, NOT additive per node. 3 zones (A onsite, B offsite-1,
+        # C offsite-2), rf=2 = each partition on 2 of them. Garage caches rf in
+        # cluster_layout and REFUSES a config/layout rf mismatch, so changing rf
+        # means a full stop + cluster_layout purge on ALL nodes (doc 07).
         replication_factor = 2;
-        consistency_mode = "consistent"; # rf=2 → W=2 / R=1 (both nodes to write, 1 to read)
+        # ⚠️ "dangerous" = W=1 / R=1, a DELIBERATE operator trade (2026-10-17): at
+        # rf=2 "consistent" is W=2, so ONE node down blocks writes to ~2/3 of the
+        # partitions (every backup fails). W=1 keeps prod's backups landing with a
+        # node down, at a cost: a write ACKed during an outage lives on ONE node
+        # until the other returns and resyncs — lose that disk in the window and
+        # the object is gone with no error to the client (prod already dropped its
+        # copy). R=1 may also read stale/missing objects from a just-returned node
+        # until resync drains. Plain config, no layout change: revert to
+        # "consistent" when moving to rf=3 (W=2 / R=2, doc 07).
+        consistency_mode = "dangerous";
 
         # Guards against non-recoverable LMDB corruption after unclean shutdown
         # (doc 00 §5 / §11).
