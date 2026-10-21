@@ -139,5 +139,17 @@
   # --- ZFS ARC cap: 16 GB RAM is shared between dev and ZFS ------------------
   # Default ARC ≈ 50% RAM (8 GB) would starve devcontainers. Cap at 4 GiB; the
   # onsite Garage load is light. Raise if a Garage scrub/repair wants more cache.
-  boot.extraModprobeConfig = "options zfs zfs_arc_max=4294967296";
+  # zfs_vdev_scrub_max_active=1 (default 3): fewer concurrent scrub I/Os per vdev,
+  # so a dpool scrub on the single HDD leaves room for garage's block reads.
+  # Applied at module load (reboot); set it live with
+  #     echo 1 | sudo tee /sys/module/zfs/parameters/zfs_vdev_scrub_max_active
+  boot.extraModprobeConfig = "options zfs zfs_arc_max=4294967296 zfs_vdev_scrub_max_active=1";
+
+  # --- Garage vs devcontainers: protect garage's memory ----------------------
+  # Devcontainers filled RAM + swap (a tmpfs /tmp alone held 7G), evicting
+  # garage's LMDB pages; every miss then waited on disk and garage's RPC stalled
+  # until peers marked node-A failed (2026-10-19). MemoryLow keeps up to 2G of
+  # garage's memory — page cache of its mmapped LMDB included — out of reclaim
+  # while other cgroups still have something to give back. Soft: no OOM risk.
+  systemd.services.garage.serviceConfig.MemoryLow = "2G";
 }

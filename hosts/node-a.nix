@@ -11,13 +11,15 @@
 #     (../modules/secureboot.nix, lanzaboote) lock the boot path so a thief cannot
 #     edit the kernel cmdline to get a shell on the decrypted root. Protects only
 #     against powered-OFF media theft.
-#   HDD = ZFS-native-encrypted `dpool` = ALL of Garage (meta + data). The MANUAL
-#     gate: keylocation=prompt, stays ciphertext until the operator runs
-#     `zfs load-key dpool/garage` over the mesh POST-boot (the moat). Ciphertext
-#     even if a powered-ON node is stolen.
+#   HDD = ZFS-native-encrypted `dpool` = Garage DATA. The MANUAL gate:
+#     keylocation=prompt, stays ciphertext until the operator runs `fleet unlock`
+#     over the mesh POST-boot (the moat). Ciphertext even if a powered-ON node is
+#     stolen. Garage META sits on the NVMe as wpool/garage-meta — its OWN
+#     encryptionroot behind the SAME manual gate + passphrase (disko-node-a.nix),
+#     NOT the TPM-auto domain: LMDB on the HDD stalled garage's RPC.
 #
 # Storage role, NOT a proxy.
-{ ... }:
+{ lib, ... }:
 {
   imports = [
     ./disko-node-a.nix
@@ -36,7 +38,7 @@
   # (unattended, no console, no mesh), so it does NOT belong in extraPools — the
   # root fileSystems entry pulls it in. Only dpool (the HDD Garage data pool,
   # imported in stage 2) is listed here. This is technically redundant — dpool is
-  # already in `allPools` via its garage/meta + garage/data fileSystems entries
+  # already in `allPools` via its garage/data fileSystems entry
   # (disko emits those for any dataset with a real mountpoint) — but it is kept as
   # an explicit belt-and-suspenders so the pool still imports if those datasets ever
   # move to mountpoint=none.
@@ -102,18 +104,38 @@
       {
         path = "/srv/garage/data-hdd";
         # 700G of a 931.5 GiB disk. NOT the raw size: this pool also carries
-        # garage/meta AND 30 days of sanoid snapshots (modules/zfs-sanoid.nix) —
+        # 30 days of sanoid snapshots (modules/zfs-sanoid.nix) —
         # the ransomware moat. Advertising the full disk fills the pool, snapshots
         # then fail to take, and the moat dies silently. Raise once real churn is
         # visible in `zpool list`; lowering it after the pool wedges is painful.
         capacity = "700G";
       }
     ];
-    # Moat: sanoid snapshots the one Garage pool. wpool datasets are NOT moat data.
+    # Moat: sanoid snapshots the Garage encryptionroots — dpool/garage (data) and
+    # wpool/garage-meta (meta, NVMe). The other wpool datasets are NOT moat data.
+    # Also drives garage-unlock/garage-status (modules/garage-ops.nix).
     sanoidDatasets = [
       "dpool/garage"
+      "wpool/garage-meta"
     ];
   };
+
+  # SHORTER retention for the meta dataset only (overrides the `garage` template
+  # per dataset). LMDB rewrites its pages constantly, so every snapshot pins a lot
+  # of churn: on the HDD at 48h/30d/2m meta snapshots held 82G. Here they share
+  # wpool's slack with docker under a 40G quota (disko-node-a.nix) — a full quota
+  # is LMDB ENOSPC. Old meta matters less than old data: B and C each hold a full
+  # meta copy, and a rollback needs `garage repair` against the peers anyway.
+  services.sanoid.datasets."wpool/garage-meta" = {
+    hourly = 24;
+    daily = 7;
+    monthly = 0;
+  };
+
+  # Scrub MONTHLY (first Sunday, 02:00), not weekly: a dpool scrub on this single
+  # HDD runs ~40h and its I/O starved garage until peers marked node-A failed
+  # (2026-10-19). Scrub priority is lowered too (modules/workstation.nix).
+  services.zfs.autoScrub.interval = lib.mkForce "Sun *-*-01..07 02:00:00";
 
   # Per-node Tailscale auth key file (see modules/sops.nix + secrets/.example).
 

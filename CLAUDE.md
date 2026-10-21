@@ -27,6 +27,11 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
 - `documentations/08-snapshot-retention-fix.md` — 2026-10-15 node-A dpool full (garage
   LMDB ENOSPC). Snapshot space ≈ churn × retention; sanoid now daily 30 / monthly 2.
   Retention alone is not enough at the Oct fbref WAL rate (~80 GiB/day) — prod side.
+- `documentations/09-node-a-meta-on-nvme.md` — 2026-10-19 node-A flapped FAILED: LMDB
+  meta on the single HDD + scrub + devcontainer RAM pressure stalled garage RPC. Meta
+  moved to `wpool/garage-meta` (own encryptionroot, prompt, same passphrase, quota 40G,
+  short retention); `MemoryLow=2G`; monthly low-priority scrub. One-shot
+  `scripts/node-a-meta-migrate` does the imperative copy.
 
 > Docs 00/01 were authored in the prod repo and bundled here; their bare
 > `documentations/0X-*.md` references and Flux/k8s paths point at the prod repo,
@@ -62,8 +67,9 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
   **deliberately forfeited** — B and C hold the real moat and must never take this role)
 - `hosts/` — `node-a/-b/-c/-d.nix`; `disko-node-a.nix` (A: **two trust domains** —
   NVMe = ESP + swap + LUKS2 `cryptwork` (TPM2/PCR-7 auto-unlock) → ZFS-root `wpool`
-  {root, sysadmin home, docker}; encrypted HDD `dpool` = ALL of Garage,
-  prompt-unlock over the mesh. Root is a `wpool` dataset, not a fixed partition),
+  {root, sysadmin home, docker, garage-meta}; encrypted HDD `dpool` = Garage data,
+  prompt-unlock over the mesh; `wpool/garage-meta` = Garage meta, its OWN
+  ZFS-native encryptionroot behind the SAME prompt gate (doc 09). Root is a `wpool` dataset, not a fixed partition),
   `disko-node-b.nix` (B: **unencrypted** ext4 root + encrypted npool + dpool),
   `disko-node-c.nix` (C: its OWN file, SAME dual-disk shape as B — NVMe npool
   ssd+meta / HDD dpool bulk; same AMD Lenovo box), `disko-gateway.nix`

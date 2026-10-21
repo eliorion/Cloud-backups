@@ -13,6 +13,9 @@
 #            wpool/root   -> /               reservation 30G
 #            wpool/home   -> /home/sysadmin  reservation 200G
 #            wpool/docker -> /var/lib/docker quota 150G
+#            wpool/garage-meta -> /srv/garage/meta  quota 40G, recordsize 16K,
+#              its OWN ZFS-native encryptionroot, keylocation=prompt (MANUAL gate,
+#              same passphrase as dpool/garage — see the dataset below)
 #     LUKS unlock = TPM2 sealed to PCR 7 (auto, keyslot 1) + the install
 #     passphrase (recovery, keyslot 0). systemd-initrd unlocks it via crypttab.
 #
@@ -21,7 +24,6 @@
 #     HDD /dev/sda whole-disk -> zpool `dpool`, ZFS NATIVE aes-256-gcm,
 #       keyformat=passphrase, keylocation=prompt:
 #         dpool/garage        encryptionroot, mountpoint none
-#         dpool/garage/meta   -> /srv/garage/meta      recordsize 16K
 #         dpool/garage/data   -> /srv/garage/data-hdd  recordsize 1M
 #
 # BOOT ORDERING (why root MUST live under the TPM gate, not the manual one):
@@ -234,12 +236,38 @@ in
             # Hitting this fails a build; without it, it fails the whole pool.
             options.quota = "150G";
           };
+          # Garage METADATA (LMDB) lives on the NVMe, NOT the HDD: random LMDB
+          # page faults on the single spinning disk stalled garage's RPC threads
+          # until peers marked node-A FAILED (2026-10-19, during a dpool scrub and
+          # under devcontainer memory pressure). It stays behind the MANUAL gate:
+          # its OWN ZFS-native encryptionroot, keylocation=prompt, SAME passphrase
+          # as dpool/garage (`fleet unlock` feeds one passphrase to every locked
+          # root). So the one exception to "no nofail on wpool" (above): this
+          # dataset IS locked at boot by design — nofail for the same reason as the
+          # dpool datasets below. wpool still imports via wpool/root, so the
+          # noauto/import trap documented below does not apply here.
+          # quota CAPS it inside wpool's shared slack: LMDB churn makes its sanoid
+          # snapshots large (82G on the HDD at the old retention), so node-a.nix
+          # also gives it a SHORTER retention. Hitting the quota = LMDB ENOSPC.
+          "garage-meta" = {
+            type = "zfs_fs";
+            mountpoint = "/srv/garage/meta";
+            mountOptions = [ "nofail" ];
+            options = {
+              encryption = "aes-256-gcm";
+              keyformat = "passphrase";
+              keylocation = garageKeylocation; # prompt at runtime; tmpfs file:// only at install
+              recordsize = "16K";
+              quota = "40G";
+            };
+          };
         };
       };
 
-      # HDD: ALL of Garage (meta + data) on ONE encryptionroot (dpool/garage),
-      # ZFS-native aes-256-gcm, keylocation=prompt → the ransomware/theft moat.
-      # meta on the HDD too (LMDB on spinning rust is fine for a DR target). The
+      # HDD: Garage DATA on ONE encryptionroot (dpool/garage), ZFS-native
+      # aes-256-gcm, keylocation=prompt → the ransomware/theft moat. Garage META
+      # moved to wpool/garage-meta (above): LMDB on this single spinning disk was
+      # NOT fine — it stalled garage's RPC until peers marked node-A failed. The
       # garage user holds NO `zfs allow` here (modules/zfs-sanoid.nix invariant).
       dpool = {
         type = "zpool";
@@ -288,12 +316,6 @@ in
           # fails harmlessly (that IS the pool being locked), boot completes, sshd
           # comes up. After `zfs load-key` the datasets mount (zfs_fs.nix:122-128
           # load-key + mount); garage.service gates on ConditionPathIsMountPoint.
-          "garage/meta" = {
-            type = "zfs_fs";
-            mountpoint = "/srv/garage/meta";
-            mountOptions = [ "nofail" ];
-            options.recordsize = "16K";
-          };
           "garage/data" = {
             type = "zfs_fs";
             mountpoint = "/srv/garage/data-hdd";
