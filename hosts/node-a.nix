@@ -104,7 +104,7 @@
       {
         path = "/srv/garage/data-hdd";
         # 700G of a 931.5 GiB disk. NOT the raw size: this pool also carries
-        # 30 days of sanoid snapshots (modules/zfs-sanoid.nix) —
+        # 15 days of sanoid snapshots (modules/zfs-sanoid.nix) —
         # the ransomware moat. Advertising the full disk fills the pool, snapshots
         # then fail to take, and the moat dies silently. Raise once real churn is
         # visible in `zpool list`; lowering it after the pool wedges is painful.

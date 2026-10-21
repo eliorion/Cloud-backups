@@ -174,3 +174,24 @@ Snapshots already pruned cannot come back.
   Oct 11 (bulk re-scrape/upsert loop, `VACUUM FULL`, reindex, unlogged→logged
   churn…) and why base backups fail (11 of 20 have only `backup.info`). While
   archiving fails, prod keeps the WAL in `pg_wal` — check that PVC is not filling.
+
+## 8. Update 2026-10-21 — retention 15 days, no monthlies
+
+Daily 30 / monthly 2 was not enough either: on 2026-10-19 node-C's `npool` hit
+0 B free (LMDB ENOSPC, corrupt `peer_list`), and on 2026-10-21 node-B's `npool`
+was at 95% with 6.3 G left. Snapshots held 150–210 G per `npool/garage/data` and
+~480 G on each `dpool/garage/data`. The September snapshots were destroyed by
+hand on both nodes (C: ~70 G, B: ~61 G reclaimed).
+
+The `garage` template is now **hourly 48 / daily 15 / monthly 0**. A monthly
+pins a whole month of churn, so keeping one would void the 15-day window. The
+mass-delete detection window is therefore **15 days**. node-A's meta dataset
+keeps its own shorter 24 h / 7 d (doc 09).
+
+⚠️ **Garage's own disk metrics hide snapshots.** `garage_local_disk_*` (and the
+Grafana panels on the metrics token) come from `statvfs`, which on ZFS reports
+`size = referenced + available` per dataset — snapshot space is in neither. On
+node-B, Grafana showed data 79% / meta 21% while `npool` was 95% full. Watch
+`zpool list -o name,cap` (or a ZFS exporter), not the Garage panels, for pool
+headroom. On nodes where meta and `data-ssd` share `npool`, they also share the
+same free space: the meta % only measures meta's own live size.

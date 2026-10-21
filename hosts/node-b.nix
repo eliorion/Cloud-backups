@@ -71,7 +71,7 @@
     # Garage spans NVMe (ssd) + HDD. Capacities ≈ usable space, tune after
     # `zpool list`. sanoid snapshots BOTH data pools (the moat).
     # Matches node-A's ~75%-of-usable ratio so each pool keeps ~25% headroom for
-    # garage/meta + 30 days of sanoid snapshots (the moat — node-a.nix:96-101).
+    # garage/meta + 15 days of sanoid snapshots (the moat — node-a.nix:96-101).
     # Previous 400G/900G advertised ~99%/~97% of the pools, starving snapshots.
     # Nominal usable: npool ≈ 405 GiB, dpool ≈ 931 GiB. Retune after `zpool list`.
     dataDirs = [

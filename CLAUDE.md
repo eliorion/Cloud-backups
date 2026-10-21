@@ -25,7 +25,7 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
   purge on every node + re-replication. Restore path is a VERIFIED rclone export
   (`rclone check --checksum`), NOT named ZFS snapshots — gated pre-flight, §6 restore.
 - `documentations/08-snapshot-retention-fix.md` — 2026-10-15 node-A dpool full (garage
-  LMDB ENOSPC). Snapshot space ≈ churn × retention; sanoid now daily 30 / monthly 2.
+  LMDB ENOSPC). Snapshot space ≈ churn × retention; sanoid now daily 15 / monthly 0 (2026-10-21: B/C npool filled even at 30/2).
   Retention alone is not enough at the Oct fbref WAL rate (~80 GiB/day) — prod side.
 - `documentations/09-node-a-meta-on-nvme.md` — 2026-10-19 node-A flapped FAILED: LMDB
   meta on the single HDD + scrub + devcontainer RAM pressure stalled garage RPC. Meta
