@@ -31,7 +31,7 @@ in the **prod repo** (`k3sclusterforlearning`) under Flux, not here.
   meta on the single HDD + scrub + devcontainer RAM pressure stalled garage RPC. Meta
   moved to `wpool/garage-meta` (own encryptionroot, prompt, same passphrase, quota 40G,
   short retention); `MemoryLow=2G`; monthly low-priority scrub. One-shot
-  `scripts/node-a-meta-migrate` does the imperative copy.
+  `fleet meta-migrate` (wraps `scripts/node-a-meta-migrate`) does the imperative copy.
 
 > Docs 00/01 were authored in the prod repo and bundled here; their bare
 > `documentations/0X-*.md` references and Flux/k8s paths point at the prod repo,

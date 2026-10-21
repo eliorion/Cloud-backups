@@ -1,6 +1,6 @@
 # 09 — node-A: Garage metadata on the NVMe
 
-**Status:** config committed; one-shot migration via `scripts/node-a-meta-migrate`.
+**Status:** config committed; one-shot migration via `fleet meta-migrate`.
 
 ## Incident (2026-10-19)
 
@@ -49,10 +49,13 @@ copy, like every deploy — doc 08).
 
 ```bash
 nix flake check
-scripts/node-a-meta-migrate status
-scripts/node-a-meta-migrate migrate   # prompts for the dpool passphrase ONCE
-scripts/fleet deploy node-a           # new fileSystems + MemoryLow; starts garage
+scripts/fleet meta-migrate status
+scripts/fleet meta-migrate            # prompts the dpool passphrase ONCE, migrates,
+                                      # then `fleet deploy node-a` (starts garage)
 ```
+
+(`fleet meta-migrate` wraps `scripts/node-a-meta-migrate`, which can also be run
+directly with `migrate|rollback|status [root@host]`.)
 
 `migrate` stops garage, proves the passphrase against `dpool/garage`, creates
 `wpool/garage-meta` with it, rsyncs the meta (garage stopped → LMDB consistent),
@@ -72,7 +75,7 @@ wpool/garage-meta` = `yes /srv/garage/meta`.
 ## Rollback
 
 ```bash
-scripts/node-a-meta-migrate rollback  # /srv/garage/meta back on dpool/garage/meta
+scripts/fleet meta-migrate rollback   # /srv/garage/meta back on dpool/garage/meta
 git revert <this change> && scripts/fleet deploy node-a
 ```
 
