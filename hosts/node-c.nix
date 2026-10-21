@@ -63,7 +63,7 @@
     scrapeProxy.enable = true;
 
     # Garage spans NVMe (ssd) + HDD, matching node-A's ~75%-of-usable ratio so the
-    # pool keeps ~25% headroom for garage/meta + 30 days of sanoid snapshots (the
+    # pool keeps ~25% headroom for garage/meta + 15 days of sanoid snapshots (the
     # moat — node-a.nix:96-101). Nominal usable: npool ≈ 405 GiB, dpool ≈ 931 GiB.
     # TODO operator: retune after `zpool list` on the real box.
     dataDirs = [

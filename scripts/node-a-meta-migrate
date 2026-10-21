@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+#
+# node-a-meta-migrate — ONE-SHOT move of node-A's Garage metadata (LMDB) from the
+#   HDD (dpool/garage/meta) to the NVMe (wpool/garage-meta). doc 09.
+#
+# The DESIRED STATE lives in git (hosts/disko-node-a.nix, hosts/node-a.nix);
+# this script only does the imperative part a deploy cannot: create the
+# encrypted dataset (disko never touches an existing pool) and copy the data.
+# Idempotent — every step checks state first, so a rerun resumes.
+#
+# Usage (from the workstation devcontainer, like scripts/fleet):
+#   scripts/node-a-meta-migrate migrate  [root@host]   create + copy + swap mounts
+#   scripts/node-a-meta-migrate rollback [root@host]   point /srv/garage/meta back
+#                                                      at dpool/garage/meta
+#   scripts/node-a-meta-migrate status   [root@host]
+#
+# Order (doc 09): migrate -> `scripts/fleet deploy node-a` -> verify.
+# Garage is left STOPPED by migrate/rollback; the deploy (or `systemctl start
+# garage`) brings it back. The old dpool/garage/meta is NEVER destroyed here.
+#
+# The passphrase is read ONCE (hidden), sent only on ssh stdin, PROVEN against
+# dpool/garage before wpool/garage-meta is created with it — so both
+# encryptionroots always share one passphrase (`fleet unlock` relies on that).
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tn="$(grep -oP 'tailnet = "\K[^"]+' "$REPO/flake.nix" | head -1)"
+[[ "$tn" != "<tailnet>" ]] || { echo "tailnet is a placeholder — run: scripts/fleet config tailnet <name>" >&2; exit 1; }
+
+cmd="${1:-}"; target="${2:-root@node-a.$tn.ts.net}"
+ssh_() { ssh -o BatchMode=yes -o ConnectTimeout=8 "$target" "$@"; }
+
+OLD=dpool/garage/meta NEW=wpool/garage-meta MNT=/srv/garage/meta STAGE=/srv/garage/meta-new
+
+# shellcheck disable=SC2016  # $vars below expand ON THE NODE.
+status_remote='zfs list -o name,encryptionroot,keystatus,mounted,mountpoint,used,quota '"$OLD $NEW"' 2>&1
+echo "garage.service: $(systemctl is-active garage.service || true)"'
+
+case "$cmd" in
+status)
+  ssh_ "$status_remote"
+  ;;
+
+migrate)
+  need_pass="$(ssh_ "zfs list -H -o keystatus $NEW 2>/dev/null || echo missing")"
+  pass=""
+  if [[ "$need_pass" != available ]]; then
+    read -rsp "dpool ZFS passphrase for node-a: " pass; echo
+    [[ -n "$pass" ]] || { echo "no passphrase given." >&2; exit 1; }
+  fi
+  # shellcheck disable=SC2016  # $vars expand ON THE NODE.
+  remote='set -eu
+IFS= read -r PASS || true
+OLD='"$OLD"' NEW='"$NEW"' MNT='"$MNT"' STAGE='"$STAGE"'
+systemctl stop garage.service
+if ! zfs list -H "$NEW" >/dev/null 2>&1; then
+  # Prove the passphrase against dpool/garage first (relock + reload it).
+  for ds in $(zfs list -H -o name -r dpool/garage); do zfs unmount "$ds" 2>/dev/null || true; done
+  zfs unload-key dpool/garage
+  if ! printf "%s" "$PASS" | zfs load-key dpool/garage; then
+    echo "WRONG passphrase — dpool is now locked; rerun (or: fleet unlock node-a)." >&2; exit 1
+  fi
+  echo ">> passphrase verified against dpool/garage"
+  printf "%s" "$PASS" | zfs create \
+    -o encryption=aes-256-gcm -o keyformat=passphrase -o keylocation=prompt \
+    -o recordsize=16K -o quota=40G -o mountpoint="$STAGE" "$NEW"
+  echo ">> created $NEW"
+  zfs mount -a
+elif [ "$(zfs get -H -o value keystatus "$NEW")" != available ]; then
+  printf "%s" "$PASS" | zfs load-key "$NEW"
+  zfs mount -a
+fi
+unset PASS
+if [ "$(zfs get -H -o value mountpoint "$OLD")" = "$MNT" ]; then
+  [ "$(zfs get -H -o value mounted "$OLD")" = yes ] || zfs mount "$OLD"
+  [ "$(zfs get -H -o value mounted "$NEW")" = yes ] || zfs mount "$NEW"
+  echo ">> copying $OLD -> $NEW (garage stopped, LMDB consistent)"
+  rsync -aHAX --numeric-ids --delete --sparse "$MNT"/ "$STAGE"/
+  # Verify by checksum: a dry-run that would transfer nothing.
+  if [ -n "$(rsync -aHAXn --numeric-ids --delete --checksum --itemize-changes "$MNT"/ "$STAGE"/)" ]; then
+    echo "VERIFY FAILED — copy differs; mounts NOT swapped." >&2; exit 1
+  fi
+  echo ">> copy verified (checksum)"
+  zfs set mountpoint=none "$OLD"
+  zfs set mountpoint="$MNT" "$NEW"
+  rmdir "$STAGE" 2>/dev/null || true
+  echo ">> $MNT is now $NEW; $OLD kept (mountpoint=none) for rollback"
+else
+  echo ">> mounts already swapped — nothing to copy"
+fi
+'"$status_remote"
+  printf '%s\n' "$pass" | ssh_ "$remote"
+  echo
+  echo "next: scripts/fleet deploy node-a   (starts garage on the new layout)"
+  ;;
+
+rollback)
+  # shellcheck disable=SC2016  # $vars expand ON THE NODE.
+  remote='set -eu
+systemctl stop garage.service
+zfs set mountpoint=none '"$NEW"'
+zfs set mountpoint='"$MNT $OLD"'
+zfs mount '"$OLD"' 2>/dev/null || true
+echo ">> '"$MNT"' is back on '"$OLD"' (writes since the migration live only in '"$NEW"'; peers resync them)"
+'"$status_remote"
+  ssh_ "$remote"
+  echo
+  echo "next: revert the doc-09 commit, then scripts/fleet deploy node-a"
+  ;;
+
+*)
+  sed -n '3,22p' "$0"; exit 2
+  ;;
+esac

@@ -37,6 +37,11 @@
 #                               Feed the ZFS passphrase to a locked node over ssh
 #                               (load-key every locked pool + mount + start garage).
 #                               Use when `fleet status` shows garage down post-reboot.
+#   fleet meta-migrate [migrate|rollback|status]
+#                               node-A ONLY, one-shot (doc 09): move Garage meta
+#                               from the HDD to wpool/garage-meta (prompts the dpool
+#                               passphrase once), then `fleet deploy node-a`.
+#                               Wraps scripts/node-a-meta-migrate.
 #   fleet status  [<node>]      Readiness + lifecycle state per node.
 #   fleet secrets               Edit / verify / git-add the encrypted secrets.
 #   fleet config tailnet <name> Set the MagicDNS tailnet in flake.nix.
@@ -791,6 +796,14 @@ echo ">> garage.service: $(systemctl is-active garage.service || true)"'
   else
     die "unlock failed on $node (wrong passphrase, or pool not imported — try: fleet finalize $node $target)."
   fi
+}
+
+cmd_meta_migrate() {
+  local action="${1:-migrate}"
+  "$ROOT/scripts/node-a-meta-migrate" "$action" "root@$(deploy_host node-a)"
+  # set -e: a failed migrate stops here, so the deploy that points fileSystems
+  # at wpool/garage-meta only runs once the mounts are really swapped.
+  if [[ "$action" == migrate ]]; then cmd_deploy node-a; fi
 }
 
 cmd_deploy() {
@@ -1772,6 +1785,7 @@ main() {
     deploy)   shift; cmd_deploy "$@";;
     rollback) shift; cmd_rollback "$@";;
     unlock)   shift; cmd_unlock "$@";;
+    meta-migrate) shift; cmd_meta_migrate "$@";;
     status)   shift; cmd_status "$@";;
     secrets)  shift; cmd_secrets "$@";;
     config)   shift; cmd_config "$@";;
@@ -1779,7 +1793,7 @@ main() {
     layout)   shift; cmd_layout "$@";;
     guide)    shift; cmd_guide "$@";;
     ""|menu)  cmd_menu;;
-    -h|--help|help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//';;
+    -h|--help|help) sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//';;
     *) die "unknown command: $1 (try: fleet --help)";;
   esac
 }
